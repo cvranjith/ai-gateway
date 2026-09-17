@@ -1,0 +1,6 @@
+{
+  "jwt_secret": "generate with generate_config.py — do not hand-write this",
+  "clients": {
+    "example_client_id": "example_client_secret"
+  }
+}
