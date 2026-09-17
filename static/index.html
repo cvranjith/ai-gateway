@@ -143,16 +143,12 @@
       </table>
       <div class="row" style="margin-top:14px">
         <div>
-          <label>Prefix</label>
-          <select id="new-key-prefix"></select>
-        </div>
-        <div>
-          <label>Param</label>
-          <input id="new-key-param" placeholder="model_id">
+          <label>Key</label>
+          <input id="new-key-key">
         </div>
         <div>
           <label>Value</label>
-          <input id="new-key-value" placeholder="gpt-5-luna">
+          <input id="new-key-value">
         </div>
         <button class="secondary" onclick="addConfigRow()">Add</button>
       </div>
@@ -259,14 +255,6 @@ async function loadConfig() {
   const data = await api("api/config");
   currentServices = data.services;
 
-  const prefixSelect = document.getElementById("new-key-prefix");
-  prefixSelect.innerHTML = "";
-  ["gateway", ...currentServices].forEach(p => {
-    const opt = document.createElement("option");
-    opt.value = p; opt.textContent = p;
-    prefixSelect.appendChild(opt);
-  });
-
   const serviceSelect = document.getElementById("test-service");
   serviceSelect.innerHTML = "";
   currentServices.forEach(s => {
@@ -299,11 +287,9 @@ function escapeAttr(s) {
 }
 
 function addConfigRow() {
-  const prefix = document.getElementById("new-key-prefix").value;
-  const param = document.getElementById("new-key-param").value.trim();
+  const key = document.getElementById("new-key-key").value.trim();
   const value = document.getElementById("new-key-value").value;
-  if (!param) return;
-  const key = `${prefix}.${param}`;
+  if (!key) return;
   const tbody = document.getElementById("config-rows");
   const existing = tbody.querySelector(`tr[data-key="${CSS.escape(key)}"]`);
   if (existing) { existing.querySelector("input").value = value; return; }
@@ -315,7 +301,7 @@ function addConfigRow() {
     <td><button class="danger" onclick="this.closest('tr').remove()">Remove</button></td>
   `;
   tbody.appendChild(tr);
-  document.getElementById("new-key-param").value = "";
+  document.getElementById("new-key-key").value = "";
   document.getElementById("new-key-value").value = "";
 }
 

@@ -62,7 +62,6 @@ SERVICES = {
     "youtube_summarizer": youtube_summarizer.handle,
 }
 
-CONFIG_KEY_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 app = Flask(__name__)
@@ -138,16 +137,15 @@ def update_config():
     if not isinstance(new_config, dict):
         return jsonify({"error": "'config' must be an object of {\"<key>\": \"<value>\"}"}), 400
 
-    valid_prefixes = set(SERVICES) | {"gateway"}
+    # No restriction to known service prefixes: config.properties is a
+    # free-form store, and get_param()'s "<service_id>.<param>" /
+    # "gateway.<param>" convention is just that - a convention for keys
+    # a service actually looks up, not a schema this endpoint enforces.
+    # Only rule is what the file format itself can't survive.
     cleaned = {}
     for key, value in new_config.items():
-        if not CONFIG_KEY_RE.match(key):
-            return jsonify({"error": f"invalid key '{key}' - must look like '<prefix>.<param>'"}), 400
-        prefix = key.split(".", 1)[0]
-        if prefix not in valid_prefixes:
-            return jsonify({
-                "error": f"unknown prefix '{prefix}' in key '{key}' - must be 'gateway' or one of {sorted(SERVICES)}",
-            }), 400
+        if not key or "\n" in key or "=" in key:
+            return jsonify({"error": f"invalid key '{key}' - must be non-empty and contain no '=' or newline"}), 400
         cleaned[key] = "" if value is None else str(value)
 
     gateway_config.save_config(cleaned)
