@@ -55,12 +55,27 @@ LENGTH_PROMPTS = {
 
 def _fetch_transcript_text(video_id):
     ytt = YouTubeTranscriptApi()
-    transcript = ytt.fetch(video_id, languages=["en", "en-US"])
-    return " ".join(snippet.text for snippet in transcript)
+    transcript_list = ytt.list(video_id)
+    # Prefer English when available (fetch() with an explicit languages=
+    # list used to be all this did), but fall back to whatever caption
+    # track actually exists rather than failing outright - a video whose
+    # only captions are e.g. Malayalam has real captions, just not in
+    # English, and treating that as "no captions available" was a bug,
+    # not intentional English-only scoping.
+    try:
+        transcript = transcript_list.find_transcript(["en", "en-US"])
+    except NoTranscriptFound:
+        transcript = next(iter(transcript_list))
+    fetched = transcript.fetch()
+    text = " ".join(snippet.text for snippet in fetched)
+    return text, transcript.language
 
 
-def _summarize_with_codex(transcript_text, length):
-    prompt = LENGTH_PROMPTS[length]
+def _summarize_with_codex(transcript_text, length, language):
+    prompt = (
+        f"{LENGTH_PROMPTS[length]} "
+        f"The transcript below is in {language}. Write the summary in {language} as well."
+    )
     model_id = (gateway_config.get_param(SERVICE_ID, "model_id", "") or "").strip()
     timeout_seconds = int(gateway_config.get_param(
         SERVICE_ID, "codex_timeout_seconds", DEFAULT_CODEX_TIMEOUT_SECONDS
@@ -112,7 +127,7 @@ def handle(params):
         raise ServiceError(f"invalid 'length' - must be one of {sorted(LENGTH_PROMPTS)}", 400)
 
     try:
-        transcript_text = _fetch_transcript_text(video_id)
+        transcript_text, language = _fetch_transcript_text(video_id)
     except (TranscriptsDisabled, NoTranscriptFound):
         raise ServiceError("no captions available for this video", 404)
     except VideoUnavailable:
@@ -125,5 +140,5 @@ def handle(params):
     if not transcript_text.strip():
         raise ServiceError("transcript was empty", 404)
 
-    summary = _summarize_with_codex(transcript_text, length)
+    summary = _summarize_with_codex(transcript_text, length, language)
     return {"video_id": video_id, "length": length, "summary": summary}

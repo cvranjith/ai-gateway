@@ -49,6 +49,19 @@ GET /ui -> the web dashboard (config editor, /invoke tester, client management)
   (passed to Codex as `-m`; leave blank to use Codex's own default),
   `youtube_summarizer.codex_timeout_seconds` (default `180`).
 
+- `youtube_download` — `params: { "video_id": "...", "kind": "video" | "audio" }`.
+  Resolves a direct, ready-to-download URL via yt-dlp (no video bytes
+  proxied through this server — the caller downloads straight from
+  YouTube's own CDN, which is what gives a normal client-side download
+  progress bar for free). Returns `{ "video_id", "kind", "title", "ext",
+  "url", "filesize" }`. `"video"` only ever returns a *progressive*
+  format (video+audio already combined in one URL, no muxing needed on
+  either end) capped at `youtube_download.max_video_height` (default
+  `1080`); if a video has no progressive format at all, this 404s
+  rather than falling back to a server-side merge (not implemented —
+  would need its own streaming route outside the `/invoke` JSON
+  contract). See `services/youtube_download.py`.
+
 ## Adding a new service
 
 1. Create `services/your_service.py` exposing `handle(params: dict) -> dict`.

@@ -57,9 +57,11 @@ from auth import (
 )
 from services.errors import ServiceError
 from services import youtube_summarizer
+from services import youtube_download
 
 SERVICES = {
     "youtube_summarizer": youtube_summarizer.handle,
+    "youtube_download": youtube_download.handle,
 }
 
 CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
