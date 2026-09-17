@@ -228,7 +228,7 @@ async function login() {
   const client_id = document.getElementById("login-id").value.trim();
   const client_secret = document.getElementById("login-secret").value;
   try {
-    const res = await fetch("/oauth/token", {
+    const res = await fetch("oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ client_id, client_secret }),
@@ -256,7 +256,7 @@ async function refreshAll() {
 }
 
 async function loadConfig() {
-  const data = await api("/api/config");
+  const data = await api("api/config");
   currentServices = data.services;
 
   const prefixSelect = document.getElementById("new-key-prefix");
@@ -328,7 +328,7 @@ async function saveConfig() {
     config[tr.dataset.key] = tr.querySelector("input").value;
   });
   try {
-    const data = await api("/api/config", { method: "POST", body: JSON.stringify({ config }) });
+    const data = await api("api/config", { method: "POST", body: JSON.stringify({ config }) });
     renderConfigRows(data.config);
     status.textContent = "Saved.";
     setTimeout(() => status.textContent = "", 2000);
@@ -361,7 +361,7 @@ async function testInvoke() {
     return;
   }
   try {
-    const data = await api("/invoke", { method: "POST", body: JSON.stringify({ service_id, params }) });
+    const data = await api("invoke", { method: "POST", body: JSON.stringify({ service_id, params }) });
     resultEl.textContent = JSON.stringify(data, null, 2);
   } catch (e) {
     resultEl.textContent = "Error: " + e.message;
@@ -369,7 +369,7 @@ async function testInvoke() {
 }
 
 async function loadClients() {
-  const data = await api("/api/clients");
+  const data = await api("api/clients");
   const list = document.getElementById("client-list");
   list.innerHTML = "";
   data.clients.forEach(id => {
@@ -383,7 +383,7 @@ async function loadClients() {
 async function deleteClient(id) {
   if (!confirm(`Delete client "${id}"? Anything using it will stop working immediately.`)) return;
   try {
-    await api("/api/clients/" + encodeURIComponent(id), { method: "DELETE" });
+    await api("api/clients/" + encodeURIComponent(id), { method: "DELETE" });
     await loadClients();
   } catch (e) {
     alert("Error: " + e.message);
@@ -395,7 +395,7 @@ async function addClient() {
   const box = document.getElementById("new-client-secret");
   if (!name) return;
   try {
-    const data = await api("/api/clients", { method: "POST", body: JSON.stringify({ name }) });
+    const data = await api("api/clients", { method: "POST", body: JSON.stringify({ name }) });
     box.innerHTML = `
       <div class="secret-box">
         Save this now — it will not be shown again.<br>
