@@ -13,9 +13,9 @@ via Codex CLI, non-interactively.
 
 `--ignore-user-config` is required, not optional: this machine's
 ~/.codex/config.toml pins a model that 400s under this account's
-ChatGPT-based auth. Ignoring it falls back to a model that both works
-and (as a side effect) skips deep reasoning, which is plenty for a
-summarization task and keeps this fast.
+ChatGPT-based auth. Ignoring it means codex falls back to its own
+built-in default model unless config.properties (or the /ui web UI)
+sets youtube_summarizer.model_id to something else.
 """
 
 import os
@@ -29,9 +29,11 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
 )
 
+import config as gateway_config
 from .errors import ServiceError
 
-CODEX_TIMEOUT_SECONDS = 180
+SERVICE_ID = "youtube_summarizer"
+DEFAULT_CODEX_TIMEOUT_SECONDS = 180
 
 LENGTH_PROMPTS = {
     "short": (
@@ -59,23 +61,30 @@ def _fetch_transcript_text(video_id):
 
 def _summarize_with_codex(transcript_text, length):
     prompt = LENGTH_PROMPTS[length]
+    model_id = (gateway_config.get_param(SERVICE_ID, "model_id", "") or "").strip()
+    timeout_seconds = int(gateway_config.get_param(
+        SERVICE_ID, "codex_timeout_seconds", DEFAULT_CODEX_TIMEOUT_SECONDS
+    ))
+
+    cmd = [
+        "codex", "exec",
+        "--ignore-user-config",
+        "--sandbox", "read-only",
+        "--skip-git-repo-check",
+        "--ephemeral",
+    ]
+    if model_id:
+        cmd += ["-m", model_id]
+
     output_fd, output_path = tempfile.mkstemp(suffix=".txt")
     os.close(output_fd)
     try:
         result = subprocess.run(
-            [
-                "codex", "exec",
-                "--ignore-user-config",
-                "--sandbox", "read-only",
-                "--skip-git-repo-check",
-                "--ephemeral",
-                "-o", output_path,
-                prompt,
-            ],
+            cmd + ["-o", output_path, prompt],
             input=transcript_text,
             capture_output=True,
             text=True,
-            timeout=CODEX_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
         if result.returncode != 0:
             raise ServiceError(

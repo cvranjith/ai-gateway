@@ -21,9 +21,19 @@ Contract:
 
     GET /health -> { "status": "ok", "services": [...] }
 
-Auth: /invoke requires OAuth2 Client Credentials — see auth.py and
-README.md. Get a token from POST /oauth/token, then send it as
-`Authorization: Bearer <token>` on every /invoke call.
+Auth: /invoke and /api/config require OAuth2 Client Credentials — see
+auth.py and README.md. Get a token from POST /oauth/token, then send
+it as `Authorization: Bearer <token>` on every call.
+
+Config: per-service and gateway-wide parameters (e.g. which model a
+service's Codex call uses) live in config.properties, read fresh on
+every request by config.py — see that module and services/*.py for how
+a service reads its own settings. GET/POST /api/config exposes it for
+the /ui web dashboard, which also has a "test the endpoint" panel that
+just calls /invoke with the same token, and a client-management panel
+(GET/POST /api/clients, DELETE /api/clients/<id>) backed by auth.py.
+On first-ever startup with no clients registered, one is auto-created
+and printed to this process's own log — see auth.ensure_bootstrap_client().
 
 Adding a new service: write a new module under services/ exposing
 handle(params: dict) -> dict (raising services.errors.ServiceError for
@@ -32,9 +42,19 @@ other change is needed — the endpoint, request/response shape, and
 error handling all stay exactly the same.
 """
 
+import re
+
 from flask import Flask, jsonify, request
 
-from auth import issue_token, require_auth
+import config as gateway_config
+from auth import (
+    create_client,
+    delete_client,
+    ensure_bootstrap_client,
+    issue_token,
+    list_clients,
+    require_auth,
+)
 from services.errors import ServiceError
 from services import youtube_summarizer
 
@@ -42,7 +62,16 @@ SERVICES = {
     "youtube_summarizer": youtube_summarizer.handle,
 }
 
+CONFIG_KEY_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 app = Flask(__name__)
+ensure_bootstrap_client()
+
+
+@app.route("/ui")
+def ui():
+    return app.send_static_file("index.html")
 
 
 @app.route("/oauth/token", methods=["POST"])
@@ -89,6 +118,75 @@ def invoke():
         return jsonify({"error": f"internal error: {e}"}), 500
 
     return jsonify({"service_id": service_id, "result": result})
+
+
+@app.route("/api/config", methods=["GET"])
+@require_auth
+def get_config():
+    return jsonify({"services": sorted(SERVICES), "config": gateway_config.load_config()})
+
+
+@app.route("/api/config", methods=["POST"])
+@require_auth
+def update_config():
+    # Full-replace, not merge: the caller (the /ui table, or a script)
+    # sends the complete desired config, so omitting a key actually
+    # removes it rather than leaving it stranded forever.
+    body = request.get_json(silent=True) or {}
+    new_config = body.get("config")
+
+    if not isinstance(new_config, dict):
+        return jsonify({"error": "'config' must be an object of {\"<key>\": \"<value>\"}"}), 400
+
+    valid_prefixes = set(SERVICES) | {"gateway"}
+    cleaned = {}
+    for key, value in new_config.items():
+        if not CONFIG_KEY_RE.match(key):
+            return jsonify({"error": f"invalid key '{key}' - must look like '<prefix>.<param>'"}), 400
+        prefix = key.split(".", 1)[0]
+        if prefix not in valid_prefixes:
+            return jsonify({
+                "error": f"unknown prefix '{prefix}' in key '{key}' - must be 'gateway' or one of {sorted(SERVICES)}",
+            }), 400
+        cleaned[key] = "" if value is None else str(value)
+
+    gateway_config.save_config(cleaned)
+    return jsonify({"services": sorted(SERVICES), "config": cleaned})
+
+
+@app.route("/api/clients", methods=["GET"])
+@require_auth
+def get_clients():
+    return jsonify({"clients": list_clients()})
+
+
+@app.route("/api/clients", methods=["POST"])
+@require_auth
+def add_client():
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+
+    if not name or not CLIENT_NAME_RE.match(name):
+        return jsonify({
+            "error": "invalid_request",
+            "error_description": "missing/invalid 'name' - letters, digits, '_', '-' only",
+        }), 400
+
+    client_id, client_secret = create_client(name)
+    return jsonify({"client_id": client_id, "client_secret": client_secret})
+
+
+@app.route("/api/clients/<client_id>", methods=["DELETE"])
+@require_auth
+def remove_client(client_id):
+    if list_clients() == [client_id]:
+        return jsonify({
+            "error": "invalid_request",
+            "error_description": "refusing to delete the only remaining client - it would lock out /ui",
+        }), 400
+    if not delete_client(client_id):
+        return jsonify({"error": "not_found"}), 404
+    return jsonify({"deleted": client_id})
 
 
 @app.route("/health", methods=["GET"])

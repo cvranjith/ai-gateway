@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-gateway</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f7;
+    --card: #ffffff;
+    --text: #1c1c1e;
+    --muted: #6e6e73;
+    --border: #e0e0e3;
+    --accent: #2563eb;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121214;
+      --card: #1c1c1f;
+      --text: #f2f2f3;
+      --muted: #9a9a9e;
+      --border: #303034;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 14px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; margin-top: 12px; }
+  label:first-child { margin-top: 0; }
+  input, select, textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+  }
+  textarea { font-family: var(--mono); font-size: 13px; min-height: 90px; resize: vertical; }
+  button {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); padding: 4px 10px; font-size: 12px; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 120px; }
+  .row > button { flex: 0 0 auto; }
+  .actions { margin-top: 16px; display: flex; gap: 10px; align-items: center; }
+  .error { color: var(--danger); font-size: 13px; margin-top: 10px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td input { padding: 5px 8px; font-size: 13px; }
+  .key-cell { font-family: var(--mono); white-space: nowrap; }
+  pre {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 12px;
+    font-family: var(--mono);
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .secret-box {
+    background: #fff7e6;
+    color: #1c1c1e;
+    border: 1px solid #f0c36d;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 13px;
+    margin-top: 12px;
+  }
+  .secret-box code { display: block; font-family: var(--mono); margin-top: 4px; word-break: break-all; }
+  .client-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .client-row:last-child { border-bottom: none; }
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="login-screen">
+    <h1>ai-gateway</h1>
+    <div class="subtitle">Sign in with a registered client to manage config and test the endpoint.</div>
+    <div class="card">
+      <h2>Sign in</h2>
+      <label for="login-id">Client ID</label>
+      <input id="login-id" autocomplete="username">
+      <label for="login-secret">Client Secret</label>
+      <input id="login-secret" type="password" autocomplete="current-password">
+      <div class="actions">
+        <button onclick="login()">Sign In</button>
+      </div>
+      <div class="hint">No client yet? Check the gateway's own startup log — one is auto-created the first time it runs with none registered.</div>
+      <div id="login-error" class="error" hidden></div>
+    </div>
+  </div>
+
+  <div id="dashboard" hidden>
+    <div class="topbar">
+      <h1>ai-gateway</h1>
+      <button class="secondary" onclick="logout()">Sign Out</button>
+    </div>
+
+    <div class="card">
+      <h2>Config</h2>
+      <table>
+        <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+        <tbody id="config-rows"></tbody>
+      </table>
+      <div class="row" style="margin-top:14px">
+        <div>
+          <label>Prefix</label>
+          <select id="new-key-prefix"></select>
+        </div>
+        <div>
+          <label>Param</label>
+          <input id="new-key-param" placeholder="model_id">
+        </div>
+        <div>
+          <label>Value</label>
+          <input id="new-key-value" placeholder="gpt-5-luna">
+        </div>
+        <button class="secondary" onclick="addConfigRow()">Add</button>
+      </div>
+      <div class="actions">
+        <button onclick="saveConfig()">Save Config</button>
+        <span id="config-status" class="hint"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Test /invoke</h2>
+      <label for="test-service">Service</label>
+      <select id="test-service" onchange="fillSampleParams()"></select>
+      <label for="test-params">Params (JSON)</label>
+      <textarea id="test-params"></textarea>
+      <div class="actions">
+        <button onclick="testInvoke()">Invoke</button>
+      </div>
+      <pre id="test-result" hidden></pre>
+    </div>
+
+    <div class="card">
+      <h2>Clients</h2>
+      <div id="client-list"></div>
+      <div class="row" style="margin-top:14px">
+        <div>
+          <label>New client name</label>
+          <input id="new-client-name" placeholder="second_brain_app">
+        </div>
+        <button class="secondary" onclick="addClient()">Add Client</button>
+      </div>
+      <div id="new-client-secret"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const TOKEN_KEY = "ai_gateway_token";
+
+function getToken() { return sessionStorage.getItem(TOKEN_KEY); }
+function setToken(t) { sessionStorage.setItem(TOKEN_KEY, t); }
+function clearToken() { sessionStorage.removeItem(TOKEN_KEY); }
+
+function showLogin(message) {
+  document.getElementById("dashboard").hidden = true;
+  document.getElementById("login-screen").hidden = false;
+  const err = document.getElementById("login-error");
+  if (message) { err.textContent = message; err.hidden = false; } else { err.hidden = true; }
+}
+
+function showDashboard() {
+  document.getElementById("login-screen").hidden = true;
+  document.getElementById("dashboard").hidden = false;
+}
+
+async function api(path, options = {}) {
+  const token = getToken();
+  const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch(path, Object.assign({}, options, { headers }));
+  if (res.status === 401) {
+    clearToken();
+    showLogin("Session expired — sign in again.");
+    throw new Error("unauthorized");
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error_description || body.error || ("HTTP " + res.status));
+  return body;
+}
+
+async function login() {
+  const client_id = document.getElementById("login-id").value.trim();
+  const client_secret = document.getElementById("login-secret").value;
+  try {
+    const res = await fetch("/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id, client_secret }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error_description || body.error || "sign-in failed");
+    setToken(body.access_token);
+    showDashboard();
+    await refreshAll();
+  } catch (e) {
+    showLogin(e.message);
+  }
+}
+
+function logout() {
+  clearToken();
+  showLogin();
+}
+
+let currentServices = [];
+
+async function refreshAll() {
+  await loadConfig();
+  await loadClients();
+}
+
+async function loadConfig() {
+  const data = await api("/api/config");
+  currentServices = data.services;
+
+  const prefixSelect = document.getElementById("new-key-prefix");
+  prefixSelect.innerHTML = "";
+  ["gateway", ...currentServices].forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p; opt.textContent = p;
+    prefixSelect.appendChild(opt);
+  });
+
+  const serviceSelect = document.getElementById("test-service");
+  serviceSelect.innerHTML = "";
+  currentServices.forEach(s => {
+    const opt = document.createElement("option");
+    opt.value = s; opt.textContent = s;
+    serviceSelect.appendChild(opt);
+  });
+  fillSampleParams();
+
+  renderConfigRows(data.config);
+}
+
+function renderConfigRows(config) {
+  const tbody = document.getElementById("config-rows");
+  tbody.innerHTML = "";
+  Object.keys(config).sort().forEach(key => {
+    const tr = document.createElement("tr");
+    tr.dataset.key = key;
+    tr.innerHTML = `
+      <td class="key-cell">${key}</td>
+      <td><input value="${escapeAttr(config[key])}"></td>
+      <td><button class="danger" onclick="this.closest('tr').remove()">Remove</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function escapeAttr(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
+function addConfigRow() {
+  const prefix = document.getElementById("new-key-prefix").value;
+  const param = document.getElementById("new-key-param").value.trim();
+  const value = document.getElementById("new-key-value").value;
+  if (!param) return;
+  const key = `${prefix}.${param}`;
+  const tbody = document.getElementById("config-rows");
+  const existing = tbody.querySelector(`tr[data-key="${CSS.escape(key)}"]`);
+  if (existing) { existing.querySelector("input").value = value; return; }
+  const tr = document.createElement("tr");
+  tr.dataset.key = key;
+  tr.innerHTML = `
+    <td class="key-cell">${key}</td>
+    <td><input value="${escapeAttr(value)}"></td>
+    <td><button class="danger" onclick="this.closest('tr').remove()">Remove</button></td>
+  `;
+  tbody.appendChild(tr);
+  document.getElementById("new-key-param").value = "";
+  document.getElementById("new-key-value").value = "";
+}
+
+async function saveConfig() {
+  const status = document.getElementById("config-status");
+  // Full replace: the table's current rows ARE the whole config, so a
+  // row removed here is genuinely gone after Save, not left stranded.
+  const config = {};
+  document.querySelectorAll("#config-rows tr").forEach(tr => {
+    config[tr.dataset.key] = tr.querySelector("input").value;
+  });
+  try {
+    const data = await api("/api/config", { method: "POST", body: JSON.stringify({ config }) });
+    renderConfigRows(data.config);
+    status.textContent = "Saved.";
+    setTimeout(() => status.textContent = "", 2000);
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  }
+}
+
+const SAMPLE_PARAMS = {
+  youtube_summarizer: { video_id: "", length: "paragraph" },
+};
+
+function fillSampleParams() {
+  const service = document.getElementById("test-service").value;
+  const textarea = document.getElementById("test-params");
+  const sample = SAMPLE_PARAMS[service] || {};
+  textarea.value = JSON.stringify(sample, null, 2);
+}
+
+async function testInvoke() {
+  const resultEl = document.getElementById("test-result");
+  resultEl.hidden = false;
+  resultEl.textContent = "Running…";
+  const service_id = document.getElementById("test-service").value;
+  let params;
+  try {
+    params = JSON.parse(document.getElementById("test-params").value || "{}");
+  } catch (e) {
+    resultEl.textContent = "Invalid JSON in params: " + e.message;
+    return;
+  }
+  try {
+    const data = await api("/invoke", { method: "POST", body: JSON.stringify({ service_id, params }) });
+    resultEl.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    resultEl.textContent = "Error: " + e.message;
+  }
+}
+
+async function loadClients() {
+  const data = await api("/api/clients");
+  const list = document.getElementById("client-list");
+  list.innerHTML = "";
+  data.clients.forEach(id => {
+    const row = document.createElement("div");
+    row.className = "client-row";
+    row.innerHTML = `<span>${id}</span><button class="danger" onclick="deleteClient('${id}')">Delete</button>`;
+    list.appendChild(row);
+  });
+}
+
+async function deleteClient(id) {
+  if (!confirm(`Delete client "${id}"? Anything using it will stop working immediately.`)) return;
+  try {
+    await api("/api/clients/" + encodeURIComponent(id), { method: "DELETE" });
+    await loadClients();
+  } catch (e) {
+    alert("Error: " + e.message);
+  }
+}
+
+async function addClient() {
+  const name = document.getElementById("new-client-name").value.trim();
+  const box = document.getElementById("new-client-secret");
+  if (!name) return;
+  try {
+    const data = await api("/api/clients", { method: "POST", body: JSON.stringify({ name }) });
+    box.innerHTML = `
+      <div class="secret-box">
+        Save this now — it will not be shown again.<br>
+        client_id: <code>${data.client_id}</code>
+        client_secret: <code>${data.client_secret}</code>
+      </div>`;
+    document.getElementById("new-client-name").value = "";
+    await loadClients();
+  } catch (e) {
+    box.innerHTML = `<div class="error">${e.message}</div>`;
+  }
+}
+
+if (getToken()) {
+  showDashboard();
+  refreshAll().catch(() => {});
+} else {
+  showLogin();
+}
+</script>
+</body>
+</html>

@@ -15,12 +15,19 @@ Flow:
        expired/forged token is rejected purely from the token itself.
 
 Registered clients + the signing secret live in auth_config.json
-(gitignored — see auth_config.json.example for the shape). Regenerate
-that file (see generate_config.py) rather than committing real
-credentials.
+(gitignored — see auth_config.json.example for the shape). It's
+created automatically (see ensure_bootstrap_client()) the first time
+the gateway starts with no clients registered yet, rather than
+requiring a manual step before the server can even come up.
+
+New clients can be added later either via generate_config.py (CLI) or
+through the /ui web dashboard's client-management panel (POST
+/api/clients) — both call create_client() below, so the two stay in
+sync automatically.
 """
 
 import json
+import secrets
 import time
 from functools import wraps
 from pathlib import Path
@@ -41,6 +48,65 @@ def _load_config():
         )
     with open(CONFIG_PATH) as f:
         return json.load(f)
+
+
+def _load_config_or_default():
+    if not CONFIG_PATH.exists():
+        return {"jwt_secret": secrets.token_urlsafe(48), "clients": {}}
+    return _load_config()
+
+
+def _save_config(config):
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+    CONFIG_PATH.chmod(0o600)
+
+
+def list_clients():
+    """Returns the registered client_ids (never secrets)."""
+    return sorted(_load_config_or_default().get("clients", {}))
+
+
+def create_client(name):
+    """Generates a new client_id/client_secret pair for `name`, registers
+    it, and returns (client_id, client_secret). The secret is returned
+    only this once and is not recoverable afterwards - callers (the CLI,
+    the /ui dashboard) must surface it to the user immediately."""
+    config = _load_config_or_default()
+    client_id = f"{name}_{secrets.token_hex(4)}"
+    client_secret = secrets.token_urlsafe(32)
+    config.setdefault("clients", {})[client_id] = client_secret
+    _save_config(config)
+    return client_id, client_secret
+
+
+def delete_client(client_id):
+    """Removes a client. Returns True if it existed."""
+    config = _load_config_or_default()
+    existed = config.get("clients", {}).pop(client_id, None) is not None
+    if existed:
+        _save_config(config)
+    return existed
+
+
+def ensure_bootstrap_client():
+    """Called once at gateway startup. If no clients are registered yet
+    (fresh install, or auth_config.json missing entirely), creates one
+    random client and prints its credentials to stdout/the gateway log -
+    since nothing is hardcoded or committed, that's the only way to get
+    in for the very first /ui sign-on. Does nothing once any client
+    exists, so it never disturbs already-issued credentials."""
+    if CONFIG_PATH.exists() and _load_config().get("clients"):
+        return
+
+    client_id, client_secret = create_client("bootstrap")
+    print("=" * 64)
+    print("ai-gateway: no clients were registered - created one to sign in with:")
+    print(f"  client_id:     {client_id}")
+    print(f"  client_secret: {client_secret}")
+    print(f"Sign in at /ui with these. Stored in {CONFIG_PATH.name}; "
+          "this secret will not be printed again.")
+    print("=" * 64)
 
 
 def issue_token(client_id, client_secret):
