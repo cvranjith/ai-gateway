@@ -90,7 +90,17 @@ def _best_progressive_video(info, max_height):
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda f: f.get("height") or 0)
+    # Prefer mp4 (H.264/AAC) over any other container/codec, even if a
+    # higher-resolution non-mp4 progressive format exists - confirmed in
+    # practice that a resolved WebM/VP9 progressive format is a
+    # perfectly valid file (plays fine in other apps) but shows a black
+    # screen in an AVPlayer-based preview: AVFoundation doesn't support
+    # the WebM container at all, regardless of the codec inside it. A
+    # lower-resolution mp4 the client can actually play beats a
+    # higher-resolution one it can't.
+    mp4_candidates = [f for f in candidates if f.get("ext") == "mp4"]
+    pool = mp4_candidates or candidates
+    return max(pool, key=lambda f: f.get("height") or 0)
 
 
 def _best_audio(info):
