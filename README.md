@@ -72,6 +72,11 @@ GET /ui -> the web dashboard (config editor, /invoke tester, client management)
   `deepsink_transcribe.device` (default CPU; `mps` is untested here). See
   `services/deepsink_transcribe.py`.
 
+- `mac_deploy` — `params: { "action": "wifi_status" | "start_deploy" | "deploy_status", "project": "ytrun" | "deepsink" }`.
+  Triggers a real rebuild+reinstall of the given app onto whichever
+  device is currently paired with this Mac (`project` defaults to
+  `"ytrun"` if omitted, for older callers). See `services/mac_deploy.py`.
+
 - `deepsink_notes` — `params: { "transcript": "...", "marker_hints": [...] }`.
   Turns a full meeting transcript into structured notes via Codex CLI —
   same subprocess pattern as `youtube_summarizer`, JSON-out instead of

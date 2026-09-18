@@ -1,18 +1,31 @@
 """service_id: "mac_deploy"
 
 params:
-    action (str, required) - "wifi_status" | "start_deploy" | "deploy_status"
+    action  (str, required) - "wifi_status" | "start_deploy" | "deploy_status"
+    project (str, optional, default "ytrun") - "ytrun" | "deepsink" - which
+             app's install script to run. Ignored by "wifi_status" (device
+             pairing/reachability isn't project-specific). Older callers
+             that never send "project" at all (yt-run's own AIGatewayClient
+             predates this param) keep working unchanged against "ytrun".
 
 result:
     wifi_status   -> { "ssid": "..." | null, "ip": "192.168.x.x" | null, "proceed_ok": true | false }
     start_deploy  -> { "status": "running" }
     deploy_status -> { "status": "idle" | "running" | "success" | "failed", "log_tail": "..." | null }
 
-Lets the phone trigger a real rebuild+reinstall of the YTRun app onto
+Lets a phone trigger a real rebuild+reinstall of its own app onto
 whichever device is currently paired with this Mac, without touching
-it directly - see install_to_device.sh (in the yt-run repo itself,
-unmodified and unparameterized - nothing from `params` ever reaches
-the shell) for the actual git-pull/build/install steps this runs.
+it directly - see INSTALL_SCRIPTS below (each script lives unmodified
+and unparameterized in its own project's repo - nothing from `params`
+ever reaches the shell beyond selecting *which* script to run) for the
+actual git-pull/build/install steps this runs.
+
+Each project gets its own lock and status state (`_locks`/`_states`,
+keyed by project), so a yt-run deploy and a DeepSink deploy can run
+independently without one blocking or clobbering the other's polled
+status - genuinely unlikely to happen at the same time in practice, but
+the two builds share nothing (different repos, different /tmp build
+dirs) so there's no reason to serialize them artificially.
 
 Split into three actions instead of one blocking call because a real
 deploy is a clean build (several minutes) and holding one HTTP request
@@ -54,12 +67,23 @@ import time
 from .errors import ServiceError
 
 SERVICE_ID = "mac_deploy"
-INSTALL_SCRIPT = "/Users/ranjithcv/Documents/code/claude/yt-run/install_to_device.sh"
+INSTALL_SCRIPTS = {
+    "ytrun": "/Users/ranjithcv/Documents/code/claude/yt-run/install_to_device.sh",
+    "deepsink": "/Users/ranjithcv/Documents/code/claude/deepsink/install_to_deepsink_device.sh",
+}
+DEFAULT_PROJECT = "ytrun"
 DEPLOY_TIMEOUT_SECONDS = 900
 MAX_LOG_LINES = 60
 
-_lock = threading.Lock()
-_state = {"status": "idle", "log_tail": None}
+_locks = {project: threading.Lock() for project in INSTALL_SCRIPTS}
+_states = {project: {"status": "idle", "log_tail": None} for project in INSTALL_SCRIPTS}
+
+
+def _resolve_project(params):
+    project = (params.get("project") or DEFAULT_PROJECT).strip().lower()
+    if project not in INSTALL_SCRIPTS:
+        raise ServiceError(f"invalid 'project' - must be one of {sorted(INSTALL_SCRIPTS)}", 400)
+    return project
 
 
 def _wifi_device():
@@ -142,40 +166,40 @@ def _paired_device_available():
         return False
 
 
-def _run_deploy():
+def _run_deploy(project):
     lines = collections.deque(maxlen=MAX_LOG_LINES)
+    state = _states[project]
     try:
         proc = subprocess.Popen(
-            ["/bin/bash", INSTALL_SCRIPT],
+            ["/bin/bash", INSTALL_SCRIPTS[project]],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
         )
         deadline = time.time() + DEPLOY_TIMEOUT_SECONDS
         for line in proc.stdout:
             lines.append(line.rstrip("\n"))
-            _state["log_tail"] = "\n".join(lines)
+            state["log_tail"] = "\n".join(lines)
             if time.time() > deadline:
                 proc.kill()
                 lines.append(f"[timed out after {DEPLOY_TIMEOUT_SECONDS}s]")
-                _state["status"] = "failed"
-                _state["log_tail"] = "\n".join(lines)
+                state["status"] = "failed"
+                state["log_tail"] = "\n".join(lines)
                 return
         returncode = proc.wait()
-        _state["status"] = "success" if returncode == 0 else "failed"
-        _state["log_tail"] = "\n".join(lines)
+        state["status"] = "success" if returncode == 0 else "failed"
+        state["log_tail"] = "\n".join(lines)
     except Exception as e:
         lines.append(f"[error: {e}]")
-        _state["status"] = "failed"
-        _state["log_tail"] = "\n".join(lines)
+        state["status"] = "failed"
+        state["log_tail"] = "\n".join(lines)
     finally:
-        _lock.release()
+        _locks[project].release()
 
 
-def _start_deploy():
-    if not _lock.acquire(blocking=False):
-        raise ServiceError("a deploy is already in progress", 409)
-    _state["status"] = "running"
-    _state["log_tail"] = None
-    threading.Thread(target=_run_deploy, daemon=True).start()
+def _start_deploy(project):
+    if not _locks[project].acquire(blocking=False):
+        raise ServiceError(f"a {project} deploy is already in progress", 409)
+    _states[project] = {"status": "running", "log_tail": None}
+    threading.Thread(target=_run_deploy, args=(project,), daemon=True).start()
     return {"status": "running"}
 
 
@@ -184,7 +208,7 @@ def handle(params):
     if action == "wifi_status":
         return _wifi_status()
     if action == "start_deploy":
-        return _start_deploy()
+        return _start_deploy(_resolve_project(params))
     if action == "deploy_status":
-        return dict(_state)
+        return dict(_states[_resolve_project(params)])
     raise ServiceError("invalid 'action' - must be 'wifi_status', 'start_deploy', or 'deploy_status'", 400)
