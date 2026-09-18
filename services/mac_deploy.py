@@ -166,10 +166,18 @@ def _paired_device_available():
     # Any successful devicectl call against the device implies the
     # trusted-connectivity session a real build/install also needs is
     # currently up.
+    # `--timeout 3` (was 8): confirmed by hand this call blocks for the
+    # full duration whenever the device is paired but not actually
+    # reachable right now (locked, walking out of Wi-Fi range, USB about
+    # to disconnect) - combined with devicectl's own list-devices
+    # overhead and normal network latency to a phone tapping "Update",
+    # the original 8s made wifi_status alone take 12+ seconds end to
+    # end, easily read as "it's stuck" even though it does eventually
+    # return. 3s is still generous for a device that's genuinely up.
     try:
         result = subprocess.run(
-            ["xcrun", "devicectl", "device", "info", "apps", "--device", udid, "--timeout", "8"],
-            capture_output=True, timeout=15,
+            ["xcrun", "devicectl", "device", "info", "apps", "--device", udid, "--timeout", "3"],
+            capture_output=True, timeout=6,
         )
         return result.returncode == 0
     except Exception:
