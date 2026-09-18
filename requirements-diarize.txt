@@ -1,0 +1,12 @@
+# For .venv-diarize ONLY - do NOT pip install this into the same shared
+# environment as requirements.txt. pyannote.audio's own dependency
+# requirements (torch>=2.8.0, numpy>=2.2.2) are incompatible with that
+# environment's pinned versions (torch 2.6.0, numpy<=2.1.x, required by
+# openai-whisper's own `numba` dependency) - confirmed the hard way, this
+# broke deepsink_transcribe outright until reverted. See
+# services/deepsink_diarize.py's module docstring for the full story.
+#
+# Setup (once):
+#   python3.10 -m venv .venv-diarize
+#   .venv-diarize/bin/pip install -r requirements-diarize.txt
+pyannote.audio

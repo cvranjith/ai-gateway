@@ -1,4 +1,6 @@
 auth_config.json
+hf_token.txt
 __pycache__/
 *.pyc
 .venv/
+.venv-diarize/

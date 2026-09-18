@@ -94,6 +94,17 @@ GET /ui -> the web dashboard (config editor, /invoke tester, client management)
   `deepsink_articulate.codex_timeout_seconds` (default `45`). See
   `services/deepsink_articulate.py`.
 
+- `deepsink_diarize` — `params: { "chunks": [{ "audio_base64", "start_offset_seconds" }, ...], "format": "m4a" }`.
+  Diarizes a whole session's audio in one pass via `pyannote.audio`,
+  running in its own isolated venv (`.venv-diarize`) and invoked as a
+  subprocess, not imported — see "deepsink_diarize setup" below for why,
+  and `services/deepsink_diarize.py`'s own module docstring for the full
+  story. Returns
+  `{ "segments": [{ "start", "end", "speaker": "SPEAKER_00" }, ...] }` in
+  session-absolute seconds — raw diarization output, not merged with any
+  transcript text. Configurable: `deepsink_diarize.timeout_seconds`
+  (default `1800` — a long meeting genuinely takes a while on CPU).
+
 ## Adding a new service
 
 1. Create `services/your_service.py` exposing `handle(params: dict) -> dict`.
@@ -118,6 +129,42 @@ service-specific key wins over a `gateway.` fallback of the same
 `param` name). Edit the file directly, or through the `/ui` config
 editor — both take effect immediately, no restart needed, since
 `config.py` reads the file fresh on every request.
+
+## `deepsink_diarize` setup
+
+One-time, and only needed if you actually want speaker detection in
+DeepSink — every other service works without any of this.
+
+1. **Create (or sign into) a free HuggingFace account** at
+   [huggingface.co](https://huggingface.co).
+2. **Accept the model licenses** — visit both of these while signed in
+   and accept the terms on each page (they're separate gates even though
+   the diarization pipeline pulls in both):
+   - [huggingface.co/pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - [huggingface.co/pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+3. **Generate an access token** at
+   [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+   — "New token", type **Read** is enough, no need for Write.
+4. **Save it** to `hf_token.txt` at this repo's root (gitignored, mode
+   600 like `auth_config.json` — `hf_token.txt.example` shows the shape):
+   ```
+   echo "<your token>" > hf_token.txt
+   chmod 600 hf_token.txt
+   ```
+5. **Create the isolated venv** this service runs in (see
+   `services/deepsink_diarize.py`'s module docstring for why it's
+   isolated from the rest of this repo's dependencies):
+   ```
+   python3.10 -m venv .venv-diarize
+   .venv-diarize/bin/pip install -r requirements-diarize.txt
+   ```
+6. Restart the gateway (`local-llm.sh --restart`). No code change needed
+   — `deepsink_diarize` reads the token fresh from `hf_token.txt` and
+   checks for `.venv-diarize` on every call, not just at startup.
+
+Until all of this is done, `deepsink_diarize` returns a clean, specific
+error (503, "Diarization isn't configured yet...") rather than failing
+oddly or crashing anything else.
 
 ## Running
 
