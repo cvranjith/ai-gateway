@@ -64,6 +64,7 @@ from services import youtube_download
 from services import mac_deploy
 from services import deepsink_transcribe
 from services import deepsink_notes
+from services import deepsink_articulate
 from services.youtube_download import FILES_DIR
 
 SERVICES = {
@@ -72,6 +73,7 @@ SERVICES = {
     "mac_deploy": mac_deploy.handle,
     "deepsink_transcribe": deepsink_transcribe.handle,
     "deepsink_notes": deepsink_notes.handle,
+    "deepsink_articulate": deepsink_articulate.handle,
 }
 
 CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
