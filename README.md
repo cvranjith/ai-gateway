@@ -141,11 +141,15 @@ DeepSink — every other service works without any of this.
 
 1. **Create (or sign into) a free HuggingFace account** at
    [huggingface.co](https://huggingface.co).
-2. **Accept the model licenses** — visit both of these while signed in
-   and accept the terms on each page (they're separate gates even though
-   the diarization pipeline pulls in both):
+2. **Accept the model licenses** — visit all three of these while signed
+   in and accept the terms on each page (separate gates even though the
+   `speaker-diarization-3.1` pipeline pulls in all of them; the third one
+   is a sub-dependency pulled in by this repo's installed
+   `pyannote.audio` version specifically — confirmed the hard way, a
+   403 naming it is exactly what a missing accept here looks like):
    - [huggingface.co/pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
    - [huggingface.co/pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+   - [huggingface.co/pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
 3. **Generate an access token** at
    [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
    — "New token", type **Read** is enough, no need for Write.
