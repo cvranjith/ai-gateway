@@ -1,0 +1,6 @@
+{
+  "jwt_secret": "generated automatically on first run — do not hand-write this",
+  "users": {
+    "your_user_id": "a werkzeug password hash, never a plaintext password — set via create_user() or the bootstrap user printed on first gateway startup"
+  }
+}

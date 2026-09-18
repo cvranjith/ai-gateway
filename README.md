@@ -137,9 +137,36 @@ gitignored — real meeting content never belongs in git) and
 `deepsink_diarize`'s `handle()` functions as plain in-process calls for
 the actual Whisper/Codex work, so each only runs from one place.
 
-Same `Authorization: Bearer <token>` as `/invoke`. Reached through
-ai-router's `/deepsink/*` passthrough in normal use, so the phone
-(or a future web client) never needs a second credential.
+### Auth: a separate user login, not `/invoke`'s client credentials
+
+`/deepsink/*` has its own auth boundary (`user_auth.py`), deliberately
+parallel to — but independent of — `auth.py`'s OAuth2 client
+credentials that gate `/invoke`. A `client_id`/`client_secret` answers
+"is this a legitimate app talking to the gateway at all"; a DeepSink
+`user_id`/`password` answers "whose session data is this," and scopes
+every `session_store.py` call to that user's own folder
+(`sessions_data/<user_id>/...`). Single user today (see
+`ensure_bootstrap_user()` — a `ranjith` user with a random password is
+created automatically on first startup if none exists yet, printed once
+to the gateway's own log, same pattern as `auth.py`'s bootstrap client),
+but every session already lives under a `user_id`, so registering a
+second user later needs no data migration.
+
+```
+POST /deepsink/auth/token
+{ "user_id": "...", "password": "..." }
+
+200 -> { "access_token": "<jwt>", "token_type": "Bearer", "expires_in": 604800 }
+401 -> { "error": "invalid_grant", "error_description": "wrong user_id or password" }
+```
+
+That JWT (a week-long expiry — a human signing into their own phone,
+not a machine client re-authing hourly) is what every `/deepsink/sessions/*`
+call below sends as `Authorization: Bearer <token>`. Reached through
+ai-router's `/deepsink/*` passthrough in normal use — that prefix
+forwards the caller's own Authorization header straight through
+unchanged (see that project's own README), rather than exchanging it
+for anything, since the auth is meant to be held by the app itself.
 
 ```
 POST   /deepsink/sessions                          { "title": "..." }              -> 201 <session>
@@ -158,7 +185,9 @@ POST   /deepsink/sessions/<id>/diarize                                          
 ```
 
 `<session>` is the full JSON object `session_store.py` maintains — id,
-title, timestamps, `stage` (`recording`|`uploading`|`summarising`|`ready`|`failed`),
+title, timestamps, `stage` (`recording`|`uploading`|`ready`|`failed` —
+only four values; "chunks uploaded, notes not back yet" is still
+`uploading` with `chunks_done == chunks_total`, not a separate stage),
 `chunks`, `transcript_blocks`, `notes`, `action_items`, `markers`,
 `speakers`, `background_notes`, plus diarization progress fields. A
 client never merges partial updates locally — every write endpoint

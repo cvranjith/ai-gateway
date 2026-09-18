@@ -1,4 +1,5 @@
 auth_config.json
+users.json
 hf_token.txt
 __pycache__/
 *.pyc
