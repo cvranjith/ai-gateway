@@ -128,8 +128,16 @@ def _wifi_status():
 
 
 def _first_paired_device_udid():
-    # The exact same lookup install_to_device.sh itself does to find a
-    # device to build for.
+    # The exact same lookup install_to_device.sh/install_to_deepsink_device.sh
+    # themselves do to find a device to build for - including the
+    # `reality == "physical"` check. Without it, a Simulator device (which
+    # also reports pairingState "paired" on this Xcode version - there's no
+    # real pairing concept for it, but the field isn't just absent) sorting
+    # before the real iPhone gets picked instead, and the readiness probe
+    # below then fails against a shutdown simulator, reporting the real
+    # phone as "not paired" even when it's sitting right there on USB.
+    # (Found the same bug, separately, in the install scripts themselves -
+    # this is the second, independent place it existed.)
     try:
         with tempfile.NamedTemporaryFile(suffix=".json") as tmp:
             subprocess.run(
@@ -140,8 +148,10 @@ def _first_paired_device_udid():
             with open(tmp.name) as f:
                 data = json.load(f)
         for d in data.get("result", {}).get("devices", []):
-            if d.get("properties", {}).get("connection", {}).get("pairingState") == "paired":
-                return d.get("properties", {}).get("hardware", {}).get("udid")
+            connection = d.get("properties", {}).get("connection", {})
+            hardware = d.get("properties", {}).get("hardware", {})
+            if connection.get("pairingState") == "paired" and hardware.get("reality") == "physical":
+                return hardware.get("udid")
     except Exception:
         pass
     return None
