@@ -2,3 +2,4 @@ flask
 youtube-transcript-api
 pyjwt
 yt-dlp
+openai-whisper

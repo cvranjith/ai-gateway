@@ -62,6 +62,24 @@ GET /ui -> the web dashboard (config editor, /invoke tester, client management)
   would need its own streaming route outside the `/invoke` JSON
   contract). See `services/youtube_download.py`.
 
+- `deepsink_transcribe` — `params: { "audio_base64": "...", "format": "m4a",
+  "chunk_index": 0, "start_offset_seconds": 0.0 }`. Transcribes one audio
+  chunk locally via OpenAI Whisper (`openai-whisper`, CPU by default — no
+  audio ever leaves this Mac). Returns
+  `{ "blocks": [{ "start", "end", "text" }, ...] }`, with `start`/`end`
+  already offset by `start_offset_seconds` so the caller does no timestamp
+  math. Configurable: `deepsink_transcribe.model_id` (default `small.en`),
+  `deepsink_transcribe.device` (default CPU; `mps` is untested here). See
+  `services/deepsink_transcribe.py`.
+
+- `deepsink_notes` — `params: { "transcript": "...", "marker_hints": [...] }`.
+  Turns a full meeting transcript into structured notes via Codex CLI —
+  same subprocess pattern as `youtube_summarizer`, JSON-out instead of
+  plain text. Returns `{ "title", "summary", "key_points", "decisions",
+  "action_items", "open_questions" }`. Configurable:
+  `deepsink_notes.model_id`, `deepsink_notes.codex_timeout_seconds`
+  (default `180`). See `services/deepsink_notes.py`.
+
 ## Adding a new service
 
 1. Create `services/your_service.py` exposing `handle(params: dict) -> dict`.

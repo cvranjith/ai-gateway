@@ -62,12 +62,16 @@ from services.errors import ServiceError
 from services import youtube_summarizer
 from services import youtube_download
 from services import mac_deploy
+from services import deepsink_transcribe
+from services import deepsink_notes
 from services.youtube_download import FILES_DIR
 
 SERVICES = {
     "youtube_summarizer": youtube_summarizer.handle,
     "youtube_download": youtube_download.handle,
     "mac_deploy": mac_deploy.handle,
+    "deepsink_transcribe": deepsink_transcribe.handle,
+    "deepsink_notes": deepsink_notes.handle,
 }
 
 CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
