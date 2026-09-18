@@ -77,20 +77,24 @@ GET /ui -> the web dashboard (config editor, /invoke tester, client management)
   device is currently paired with this Mac (`project` defaults to
   `"ytrun"` if omitted, for older callers). See `services/mac_deploy.py`.
 
-- `deepsink_notes` — `params: { "transcript": "...", "marker_hints": [...] }`.
+- `deepsink_notes` — `params: { "transcript": "...", "marker_hints": [...], "background_notes": "..." }`.
   Turns a full meeting transcript into structured notes via Codex CLI —
   same subprocess pattern as `youtube_summarizer`, JSON-out instead of
-  plain text. Returns `{ "title", "summary", "key_points", "decisions",
-  "action_items", "open_questions" }`. Configurable:
-  `deepsink_notes.model_id`, `deepsink_notes.codex_timeout_seconds`
-  (default `180`). See `services/deepsink_notes.py`.
+  plain text. `background_notes` is free-text context the user typed
+  about the session (attendees, agenda, acronyms) — used to interpret
+  the transcript, never treated as meeting content itself. Returns
+  `{ "title", "summary", "key_points", "decisions", "action_items",
+  "open_questions" }`. Configurable: `deepsink_notes.model_id`,
+  `deepsink_notes.codex_timeout_seconds` (default `180`). See
+  `services/deepsink_notes.py`.
 
-- `deepsink_articulate` — `params: { "transcript": "..." }`. Same idea as
-  `deepsink_notes` but for a short, recent excerpt rather than a full
-  transcript, and tuned to be fast (tapped mid-meeting, waited on) rather
-  than thorough. Returns `{ "bullets": [...], "speech": "..." }` — quick
-  reference points, plus the same content phrased as something to read
-  out loud. Configurable: `deepsink_articulate.model_id`,
+- `deepsink_articulate` — `params: { "transcript": "...", "background_notes": "..." }`.
+  Same idea as `deepsink_notes` but for a short, recent excerpt rather
+  than a full transcript, and tuned to be fast (tapped mid-meeting,
+  waited on) rather than thorough; `background_notes` is the same field
+  `deepsink_notes` takes. Returns `{ "bullets": [...], "speech": "..." }`
+  — quick reference points, plus the same content phrased as something
+  to read out loud. Configurable: `deepsink_articulate.model_id`,
   `deepsink_articulate.codex_timeout_seconds` (default `45`). See
   `services/deepsink_articulate.py`.
 

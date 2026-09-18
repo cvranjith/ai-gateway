@@ -1,11 +1,15 @@
 """service_id: "deepsink_notes"
 
 params:
-    transcript     (str, required) - full session transcript text
-    marker_hints   (list, optional) - [{"offset_seconds": <float>, "comment": "<str>"}, ...]
-                   moments the user tapped "mark this moment" on while
-                   recording - passed to the model as a hint about what
-                   mattered, per requirement-deepsink-mobile.md FR-4.
+    transcript       (str, required) - full session transcript text
+    marker_hints     (list, optional) - [{"offset_seconds": <float>, "comment": "<str>"}, ...]
+                     moments the user tapped "mark this moment" on while
+                     recording - passed to the model as a hint about what
+                     mattered, per requirement-deepsink-mobile.md FR-4.
+    background_notes (str, optional) - free-text context the user typed
+                     about the session (who's in the room, the agenda,
+                     acronyms/jargon, prior history) - not part of the
+                     transcript, just background for interpreting it.
 
 result: the deepsink.notes JSON shape from requirement-deepsink-mobile.md
 FR-4, returned as a real JSON object (not a string) - DeepSink decodes
@@ -46,7 +50,7 @@ Output ONLY a single JSON object, no markdown code fences, no commentary before 
 - "action_items": array of objects {"text": str, "owner": "me" | "<name>" | "unknown", "due": "<date>" | null}
 - "open_questions": array of strings, questions raised but not resolved (empty array if none)
 
-If the transcript doesn't clearly support a field, use an empty array (or empty string for "summary") rather than inventing content. If the user marked specific moments as important (see below, if present), weight those moments more heavily when deciding what counts as a key point, decision, or action item."""
+If the transcript doesn't clearly support a field, use an empty array (or empty string for "summary") rather than inventing content. If the user marked specific moments as important (see below, if present), weight those moments more heavily when deciding what counts as a key point, decision, or action item. If background notes are provided, use them to interpret the transcript correctly (names, acronyms, context) - they are not meeting content themselves and should not be echoed back into the summary or key points."""
 
 
 def _format_offset(seconds):
@@ -66,6 +70,12 @@ def _build_marker_section(marker_hints):
     return "\n".join(lines) + "\n\n"
 
 
+def _build_background_section(background_notes):
+    if not background_notes:
+        return ""
+    return f"Background provided by the user (not part of the transcript itself):\n{background_notes}\n\n"
+
+
 def _extract_json(raw_text):
     text = raw_text.strip()
     # Codex sometimes wraps output in a ```json ... ``` fence despite being
@@ -82,7 +92,7 @@ def _extract_json(raw_text):
     return json.loads(text)
 
 
-def _generate_with_codex(transcript, marker_hints):
+def _generate_with_codex(transcript, marker_hints, background_notes):
     model_id = (gateway_config.get_param(SERVICE_ID, "model_id", "") or "").strip()
     timeout_seconds = int(gateway_config.get_param(
         SERVICE_ID, "codex_timeout_seconds", DEFAULT_CODEX_TIMEOUT_SECONDS
@@ -98,7 +108,11 @@ def _generate_with_codex(transcript, marker_hints):
     if model_id:
         cmd += ["-m", model_id]
 
-    stdin_text = _build_marker_section(marker_hints) + "Transcript:\n" + transcript
+    stdin_text = (
+        _build_background_section(background_notes)
+        + _build_marker_section(marker_hints)
+        + "Transcript:\n" + transcript
+    )
 
     output_fd, output_path = tempfile.mkstemp(suffix=".txt")
     os.close(output_fd)
@@ -138,4 +152,6 @@ def handle(params):
     if not isinstance(marker_hints, list):
         raise ServiceError("'marker_hints' must be an array", 400)
 
-    return _generate_with_codex(transcript, marker_hints)
+    background_notes = (params.get("background_notes") or "").strip()
+
+    return _generate_with_codex(transcript, marker_hints, background_notes)

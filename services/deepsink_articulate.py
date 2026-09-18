@@ -1,10 +1,16 @@
 """service_id: "deepsink_articulate"
 
 params:
-    transcript (str, required) - a short, recent excerpt of the session's
-                transcript (on-device recognized on the phone, not the
-                accurate Whisper one - see DeepSink's LiveAssistEngine),
-                typically the last few minutes, not the whole meeting.
+    transcript       (str, required) - a short, recent excerpt of the
+                     session's transcript (on-device recognized on the
+                     phone, not the accurate Whisper one - see DeepSink's
+                     LiveAssistEngine), typically the last few minutes,
+                     not the whole meeting.
+    background_notes (str, optional) - free-text context the user typed
+                     about the session (who's in the room, the agenda,
+                     acronyms/jargon, prior history) - the same field
+                     deepsink_notes takes, reused here so an answer given
+                     mid-meeting benefits from it too.
 
 result:
     {"bullets": ["...", ...], "speech": "..."}
@@ -37,7 +43,13 @@ Output ONLY a single JSON object, no markdown code fences, no commentary, with e
 - "bullets": array of 2-5 short strings - the quickest possible reference to what's just been discussed and, if there's an apparent question, the key points of a reasonable answer or opinion
 - "speech": a short (2-4 sentence) first-person, conversational response phrased as something to actually say out loud right now - not a summary, an answer, in a natural spoken style
 
-If the excerpt doesn't contain a clear question, treat it as "catch me up" instead: bullets covering what's just been said, and speech as a short spoken recap."""
+If the excerpt doesn't contain a clear question, treat it as "catch me up" instead: bullets covering what's just been said, and speech as a short spoken recap. If background notes are provided, use them to interpret the excerpt correctly (names, acronyms, context) - they are not part of the conversation itself."""
+
+
+def _build_background_section(background_notes):
+    if not background_notes:
+        return ""
+    return f"Background provided by the user (not part of the conversation itself):\n{background_notes}\n\n"
 
 
 def _extract_json(raw_text):
@@ -52,7 +64,7 @@ def _extract_json(raw_text):
     return json.loads(text)
 
 
-def _generate_with_codex(transcript):
+def _generate_with_codex(transcript, background_notes):
     model_id = (gateway_config.get_param(SERVICE_ID, "model_id", "") or "").strip()
     timeout_seconds = int(gateway_config.get_param(
         SERVICE_ID, "codex_timeout_seconds", DEFAULT_CODEX_TIMEOUT_SECONDS
@@ -68,12 +80,14 @@ def _generate_with_codex(transcript):
     if model_id:
         cmd += ["-m", model_id]
 
+    stdin_text = _build_background_section(background_notes) + f"Transcript excerpt:\n{transcript}"
+
     output_fd, output_path = tempfile.mkstemp(suffix=".txt")
     os.close(output_fd)
     try:
         result = subprocess.run(
             cmd + ["-o", output_path, INSTRUCTIONS],
-            input=f"Transcript excerpt:\n{transcript}",
+            input=stdin_text,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -101,4 +115,5 @@ def handle(params):
     transcript = (params.get("transcript") or "").strip()
     if not transcript:
         raise ServiceError("missing 'transcript'", 400)
-    return _generate_with_codex(transcript)
+    background_notes = (params.get("background_notes") or "").strip()
+    return _generate_with_codex(transcript, background_notes)
