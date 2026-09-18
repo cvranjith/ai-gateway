@@ -61,11 +61,13 @@ from auth import (
 from services.errors import ServiceError
 from services import youtube_summarizer
 from services import youtube_download
+from services import mac_deploy
 from services.youtube_download import FILES_DIR
 
 SERVICES = {
     "youtube_summarizer": youtube_summarizer.handle,
     "youtube_download": youtube_download.handle,
+    "mac_deploy": mac_deploy.handle,
 }
 
 CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -216,5 +218,10 @@ def health():
 
 if __name__ == "__main__":
     # 0.0.0.0 so this is reachable from Caddy/other local processes, not
-    # just localhost-from-this-same-process.
-    app.run(host="0.0.0.0", port=8788)
+    # just localhost-from-this-same-process. threaded=True matters now
+    # that mac_deploy's "deploy_status" needs to be pollable *while*
+    # "start_deploy"'s background thread is running - the single-
+    # threaded default would otherwise queue every other request
+    # (including unrelated ones like youtube_summarizer) behind
+    # whichever one is currently being handled.
+    app.run(host="0.0.0.0", port=8788, threaded=True)
