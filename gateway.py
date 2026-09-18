@@ -21,6 +21,8 @@ Contract:
 
     GET /health -> { "status": "ok", "services": [...] }
 
+    GET /files/<name> -> the file itself (unauthenticated - see below)
+
 Auth: /invoke and /api/config require OAuth2 Client Credentials — see
 auth.py and README.md. Get a token from POST /oauth/token, then send
 it as `Authorization: Bearer <token>` on every call.
@@ -43,8 +45,9 @@ error handling all stay exactly the same.
 """
 
 import re
+from pathlib import Path
 
-from flask import Flask, jsonify, request
+from flask import Flask, abort, jsonify, request, send_file
 
 import config as gateway_config
 from auth import (
@@ -58,6 +61,7 @@ from auth import (
 from services.errors import ServiceError
 from services import youtube_summarizer
 from services import youtube_download
+from services.youtube_download import FILES_DIR
 
 SERVICES = {
     "youtube_summarizer": youtube_summarizer.handle,
@@ -187,6 +191,22 @@ def remove_client(client_id):
     if not delete_client(client_id):
         return jsonify({"error": "not_found"}), 404
     return jsonify({"deleted": client_id})
+
+
+@app.route("/files/<path:filename>", methods=["GET"])
+def serve_file(filename):
+    # Unauthenticated by design - same trust model as the signed
+    # YouTube CDN URLs `youtube_download` normally hands back directly
+    # for "video": an unguessable (UUID) filename that expires on its
+    # own (see that service's cleanup sweep) rather than living behind
+    # the OAuth bearer token /invoke needs. `.name` strips any
+    # directory components, so this can't escape FILES_DIR regardless
+    # of what the URL contains.
+    safe_name = Path(filename).name
+    path = FILES_DIR / safe_name
+    if not path.is_file():
+        abort(404)
+    return send_file(path, mimetype="audio/mp4")
 
 
 @app.route("/health", methods=["GET"])
