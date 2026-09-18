@@ -124,6 +124,53 @@ GET /ui -> the web dashboard (config editor, /invoke tester, client management)
 
 No endpoint, request/response shape, or error-handling change needed.
 
+## DeepSink session store (REST API)
+
+Genuinely different in kind from everything above: `/invoke`'s services
+are stateless function calls (audio in, text out; forgotten immediately
+after). `/deepsink/sessions/*` is real, permanent CRUD — this Mac is now
+the source of truth for DeepSink sessions, not the phone's local store.
+See `session_store.py` (one JSON file per session under `sessions_data/`,
+gitignored — real meeting content never belongs in git) and
+`deepsink_sessions.py` (the Flask Blueprint below, registered in
+`gateway.py`). Reuses `deepsink_transcribe`/`deepsink_notes`/
+`deepsink_diarize`'s `handle()` functions as plain in-process calls for
+the actual Whisper/Codex work, so each only runs from one place.
+
+Same `Authorization: Bearer <token>` as `/invoke`. Reached through
+ai-router's `/deepsink/*` passthrough in normal use, so the phone
+(or a future web client) never needs a second credential.
+
+```
+POST   /deepsink/sessions                          { "title": "..." }              -> 201 <session>
+GET    /deepsink/sessions                                                          -> { "sessions": [<session>, ...] }
+GET    /deepsink/sessions/<id>                                                     -> <session>
+PATCH  /deepsink/sessions/<id>                      { "title" | "background_notes" | "duration_seconds" | "recording_incomplete": ... } -> <session>
+DELETE /deepsink/sessions/<id>                                                     -> { "deleted": "<id>" }
+
+POST   /deepsink/sessions/<id>/chunks               { "audio_base64", "chunk_index", "start_offset_seconds", "duration_seconds", "format" }
+                                                     -> transcribes via deepsink_transcribe, persists the chunk + blocks -> <session>
+POST   /deepsink/sessions/<id>/finish                                              -> generates notes via deepsink_notes, persists -> <session>
+POST   /deepsink/sessions/<id>/notes/regenerate                                    -> same as /finish, for re-running after a transcript edit
+PATCH  /deepsink/sessions/<id>/action_items/<item_id>  { "is_checked": true|false } -> <session>
+POST   /deepsink/sessions/<id>/markers              { "offset_seconds", "comment" } -> <session>
+POST   /deepsink/sessions/<id>/diarize                                             -> runs deepsink_diarize against all stored chunks, persists speaker-tagged blocks -> <session>
+```
+
+`<session>` is the full JSON object `session_store.py` maintains — id,
+title, timestamps, `stage` (`recording`|`uploading`|`summarising`|`ready`|`failed`),
+`chunks`, `transcript_blocks`, `notes`, `action_items`, `markers`,
+`speakers`, `background_notes`, plus diarization progress fields. A
+client never merges partial updates locally — every write endpoint
+returns the full, current session, so re-rendering is just "replace
+what I'm showing with this response."
+
+A per-session `threading.Lock` (`session_store.py`) serializes each
+session's own read-modify-write cycle, since Flask runs `threaded=True`
+and two requests for the same session (e.g. two chunk uploads landing
+close together) can genuinely race. Different sessions never block each
+other.
+
 ## Config
 
 Per-service and gateway-wide parameters live in `config.properties`

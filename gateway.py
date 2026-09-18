@@ -67,6 +67,7 @@ from services import deepsink_notes
 from services import deepsink_articulate
 from services import deepsink_diarize
 from services.youtube_download import FILES_DIR
+from deepsink_sessions import bp as deepsink_sessions_bp
 
 SERVICES = {
     "youtube_summarizer": youtube_summarizer.handle,
@@ -81,6 +82,7 @@ SERVICES = {
 CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 app = Flask(__name__)
+app.register_blueprint(deepsink_sessions_bp)
 ensure_bootstrap_client()
 
 
