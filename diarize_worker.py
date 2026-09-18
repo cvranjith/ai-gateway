@@ -54,11 +54,22 @@ def main():
 
     try:
         pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
-        diarization = pipeline(wav_path)
+        output = pipeline(wav_path)
     except Exception as e:
         print(f"diarization failed: {e}", file=sys.stderr)
         return 1
 
+    # pyannote.audio 4.x returns a `DiarizeOutput` dataclass rather than
+    # the bare `Annotation` 3.x returned directly — confirmed the hard
+    # way (an AttributeError on the old `.itertracks` call) since
+    # requirements-diarize.txt intentionally leaves the version
+    # unpinned. `exclusive_speaker_diarization` (vs. plain
+    # `speaker_diarization`) drops overlapping speech turns, which is
+    # the right choice here: DeepSink aligns these segments against
+    # already-non-overlapping Whisper transcript blocks (see
+    # SpeakerDiarization.assign on the app side), so a turn that two
+    # speakers talk over at once has nowhere correct to go anyway.
+    diarization = output.exclusive_speaker_diarization
     segments = [
         {"start": round(turn.start, 2), "end": round(turn.end, 2), "speaker": speaker}
         for turn, _, speaker in diarization.itertracks(yield_label=True)
