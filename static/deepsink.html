@@ -291,6 +291,7 @@ let currentTab = "notes";
 let liveEventSource = null;
 let pollTimer = null;
 let chatBusy = false;
+let hasSetInitialTab = false;
 
 function getToken() { return sessionStorage.getItem(TOKEN_KEY); }
 function setToken(t) { sessionStorage.setItem(TOKEN_KEY, t); }
@@ -320,6 +321,7 @@ function showDetail(id) {
   document.getElementById("detail-view").hidden = false;
   document.getElementById("chat-log").innerHTML = "";
   showTab("notes");
+  hasSetInitialTab = false;
   loadSession(id);
 }
 
@@ -425,6 +427,15 @@ async function createSession() {
 async function loadSession(id) {
   try {
     currentSession = await api("sessions/" + encodeURIComponent(id));
+    // Default to the Transcript tab for a session that's actually live
+    // right now, so opening one you're watching record lands you
+    // straight on the thing that's changing - but only on the first
+    // load, not every poll tick, so switching to Notes yourself while
+    // it's still live doesn't get yanked back.
+    if (!hasSetInitialTab) {
+      hasSetInitialTab = true;
+      showTab(isLiveStage(currentSession.stage) ? "transcript" : "notes");
+    }
     renderDetail();
   } catch (e) {
     if (e.message !== "unauthorized") showList();
@@ -533,8 +544,12 @@ function renderLiveLine(text) {
 function renderNotes() {
   const el = document.getElementById("notes-content");
   const notes = currentSession.notes;
+  const generating = currentSession.is_generating_notes
+    ? `<div class="hint" style="margin-bottom:10px">⏳ Generating notes…</div>` : "";
+  document.getElementById("regenerate-btn").disabled = !!currentSession.is_generating_notes;
+
   if (!notes || (!notes.summary && !(notes.key_points || []).length)) {
-    el.innerHTML = `<div class="empty-state">No notes yet — generated automatically once the transcript is ready, or tap Regenerate Notes.</div>`;
+    el.innerHTML = generating + `<div class="empty-state">No notes yet — generated automatically once the transcript is ready, or tap Regenerate Notes.</div>`;
     return;
   }
   const section = (title, items, isList) => {
@@ -542,7 +557,7 @@ function renderNotes() {
     const body = isList ? `<ul>${items.map(i => `<li>${escapeHtml(i)}</li>`).join("")}</ul>` : `<p>${escapeHtml(items)}</p>`;
     return `<div class="notes-section"><h3>${title}</h3>${body}</div>`;
   };
-  el.innerHTML = [
+  el.innerHTML = generating + [
     section("Summary", notes.summary, false),
     section("Key Points", notes.key_points, true),
     section("Decisions", notes.decisions, true),
@@ -550,44 +565,113 @@ function renderNotes() {
   ].join("");
 }
 
+const TRANSCRIPT_VIEW_KEY = "deepsink_transcript_view";
+function getTranscriptView() {
+  // A per-viewer convenience (which layout you prefer), not session
+  // data - localStorage is the right tier for this, never read back by
+  // the server or by anyone but this one browser.
+  try { return localStorage.getItem(TRANSCRIPT_VIEW_KEY) || "paragraph"; } catch (e) { return "paragraph"; }
+}
+function setTranscriptView(view) {
+  try { localStorage.setItem(TRANSCRIPT_VIEW_KEY, view); } catch (e) { /* private window, etc - just won't stick */ }
+  renderTranscript();
+}
+
+function fmtTimestamp(seconds) {
+  const mm = Math.floor(seconds / 60);
+  const ss = Math.floor(seconds % 60).toString().padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+// Groups consecutive same-speaker blocks into one paragraph - easier to
+// read than a timestamp on every line, especially once Detect Speakers
+// has run and turns are attributable. Blocks with no speaker_id at all
+// (not yet diarized) are grouped purely by adjacency instead, so an
+// un-diarized transcript still reads as a few paragraphs rather than
+// one wall of text.
+function groupIntoParagraphs(blocks) {
+  const paragraphs = [];
+  for (const b of blocks) {
+    const last = paragraphs[paragraphs.length - 1];
+    if (last && last.speakerId === (b.speaker_id || null)) {
+      last.text += " " + b.text;
+      last.end = b.end;
+    } else {
+      paragraphs.push({ speakerId: b.speaker_id || null, start: b.start, end: b.end, text: b.text });
+    }
+  }
+  return paragraphs;
+}
+
 function renderTranscript() {
   const el = document.getElementById("transcript-content");
   el.innerHTML = "";
   const speakers = currentSession.speakers || [];
+  const speakerNames = {};
+  speakers.forEach(sp => { speakerNames[sp.id] = sp.display_name; });
+
+  const toolbar = document.createElement("div");
+  toolbar.style.cssText = "display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px";
 
   // Built with createElement/addEventListener, not a template string,
   // since each button's handler needs the exact (unescaped) speaker id/
   // name as JS values - baking those into an inline onclick="..."
   // attribute string would need its own separate escaping discipline
   // for no real benefit over just doing it this way.
-  if (speakers.length > 0) {
-    const bar = document.createElement("div");
-    bar.style.marginBottom = "12px";
-    speakers.forEach(sp => {
-      const btn = document.createElement("button");
-      btn.className = "secondary";
-      btn.style.cssText = "margin:0 6px 6px 0; padding:5px 10px; font-size:12px";
-      btn.textContent = sp.display_name + " ✎";
-      btn.onclick = () => renameSpeaker(sp.id, sp.display_name);
-      bar.appendChild(btn);
-    });
-    el.appendChild(bar);
-  }
+  const speakerBar = document.createElement("div");
+  speakers.forEach(sp => {
+    const btn = document.createElement("button");
+    btn.className = "secondary";
+    btn.style.cssText = "margin:0 6px 6px 0; padding:5px 10px; font-size:12px";
+    btn.textContent = sp.display_name + " ✎";
+    btn.onclick = () => renameSpeaker(sp.id, sp.display_name);
+    speakerBar.appendChild(btn);
+  });
+  toolbar.appendChild(speakerBar);
+
+  const view = getTranscriptView();
+  const viewToggle = document.createElement("div");
+  ["paragraph", "timestamps"].forEach(v => {
+    const btn = document.createElement("button");
+    btn.className = v === view ? "" : "secondary";
+    btn.style.cssText = "padding:5px 10px; font-size:12px; margin-left:6px";
+    btn.textContent = v === "paragraph" ? "Paragraphs" : "Timestamps";
+    btn.onclick = () => setTranscriptView(v);
+    viewToggle.appendChild(btn);
+  });
+  toolbar.appendChild(viewToggle);
+  el.appendChild(toolbar);
 
   const blocks = (currentSession.transcript_blocks || []).slice().sort((a, b) => a.start - b.start);
   if (blocks.length === 0) {
     el.insertAdjacentHTML("beforeend", `<div class="empty-state">No transcript yet.</div>`);
-    return;
+  } else if (view === "paragraph") {
+    const paragraphsHtml = groupIntoParagraphs(blocks).map(p => {
+      const speaker = p.speakerId ? `<span class="transcript-speaker">${escapeHtml(speakerNames[p.speakerId] || p.speakerId)}:</span>` : "";
+      return `<div class="transcript-block"><span class="transcript-time">${fmtTimestamp(p.start)}</span>${speaker}${escapeHtml(p.text)}</div>`;
+    }).join("");
+    el.insertAdjacentHTML("beforeend", paragraphsHtml);
+  } else {
+    const blocksHtml = blocks.map(b => {
+      const speaker = b.speaker_id ? `<span class="transcript-speaker">${escapeHtml(speakerNames[b.speaker_id] || b.speaker_id)}:</span>` : "";
+      return `<div class="transcript-block"><span class="transcript-time">${fmtTimestamp(b.start)}</span>${speaker}${escapeHtml(b.text)}</div>`;
+    }).join("");
+    el.insertAdjacentHTML("beforeend", blocksHtml);
   }
-  const speakerNames = {};
-  speakers.forEach(sp => { speakerNames[sp.id] = sp.display_name; });
-  const blocksHtml = blocks.map(b => {
-    const mm = Math.floor(b.start / 60);
-    const ss = Math.floor(b.start % 60).toString().padStart(2, "0");
-    const speaker = b.speaker_id ? `<span class="transcript-speaker">${escapeHtml(speakerNames[b.speaker_id] || b.speaker_id)}:</span>` : "";
-    return `<div class="transcript-block"><span class="transcript-time">${mm}:${ss}</span>${speaker}${escapeHtml(b.text)}</div>`;
-  }).join("");
-  el.insertAdjacentHTML("beforeend", blocksHtml);
+
+  // Reflects is_diarizing/diarization_error regardless of what
+  // triggered it (this tab's own click, another tab, or the automatic
+  // post-/finish trigger) - not just state local to a click handler,
+  // since polling can surface either at any time now.
+  const diarizeBtn = document.getElementById("diarize-btn");
+  const diarizeStatus = document.getElementById("diarize-status");
+  diarizeBtn.disabled = !!currentSession.is_diarizing;
+  diarizeBtn.textContent = speakers.length > 0 ? "Re-detect Speakers" : "Detect Speakers";
+  if (currentSession.is_diarizing) {
+    diarizeStatus.textContent = "Detecting speakers — this can take a while for a long session…";
+  } else if (currentSession.diarization_error) {
+    diarizeStatus.textContent = "Error: " + currentSession.diarization_error;
+  }
 }
 
 function renderActions() {
