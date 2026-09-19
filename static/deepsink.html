@@ -458,17 +458,20 @@ function isLiveStage(stage) {
   return stage === "recording" || stage === "uploading";
 }
 
-// While a session is still being recorded/uploaded, the transcript,
-// notes, and action items can all keep changing server-side (a chunk
-// landing, the background auto-regen it triggers) with nothing on this
-// page to push those changes to a *viewer* the way live_preview does
-// for the rough in-progress text - so this just re-fetches on a plain
-// timer instead. Stops itself once the session reaches "ready"/"failed"
-// (see the call at the end of renderDetail), since nothing more is
-// expected to change at that point.
+// Deliberately NOT gated on the session's last-known stage - that was
+// the actual bug (found from real use): a session viewed while already
+// "ready" stays "ready" in this page's own memory forever unless
+// *something* re-fetches it, so a session that goes live again later
+// (Resume Recording, from the phone) was never detected - the page had
+// already decided not to poll, and nothing ever told it to reconsider.
+// Simplest fix that can't have that chicken-and-egg gap: poll
+// continuously for as long as a session's detail view is open, however
+// stage looks right now - stopped only by leaving the session
+// (showList's stopPolling), not by stage. A little wasted work polling
+// an already-finished session someone's just reading is a fine trade
+// for "the page never needs a manual refresh to catch up."
 function updatePollingForSession() {
-  const shouldPoll = currentSession && isLiveStage(currentSession.stage);
-  if (shouldPoll && !pollTimer) {
+  if (currentSession && !pollTimer) {
     pollTimer = setInterval(async () => {
       if (!currentSession) return;
       try {
@@ -478,8 +481,8 @@ function updatePollingForSession() {
       } catch (e) {
         if (e.message === "unauthorized") stopPolling();
       }
-    }, 5000);
-  } else if (!shouldPoll && pollTimer) {
+    }, 7000);
+  } else if (!currentSession && pollTimer) {
     stopPolling();
   }
 }
