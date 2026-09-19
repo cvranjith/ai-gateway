@@ -549,19 +549,42 @@ function renderNotes() {
 
 function renderTranscript() {
   const el = document.getElementById("transcript-content");
+  el.innerHTML = "";
+  const speakers = currentSession.speakers || [];
+
+  // Built with createElement/addEventListener, not a template string,
+  // since each button's handler needs the exact (unescaped) speaker id/
+  // name as JS values - baking those into an inline onclick="..."
+  // attribute string would need its own separate escaping discipline
+  // for no real benefit over just doing it this way.
+  if (speakers.length > 0) {
+    const bar = document.createElement("div");
+    bar.style.marginBottom = "12px";
+    speakers.forEach(sp => {
+      const btn = document.createElement("button");
+      btn.className = "secondary";
+      btn.style.cssText = "margin:0 6px 6px 0; padding:5px 10px; font-size:12px";
+      btn.textContent = sp.display_name + " ✎";
+      btn.onclick = () => renameSpeaker(sp.id, sp.display_name);
+      bar.appendChild(btn);
+    });
+    el.appendChild(bar);
+  }
+
   const blocks = (currentSession.transcript_blocks || []).slice().sort((a, b) => a.start - b.start);
   if (blocks.length === 0) {
-    el.innerHTML = `<div class="empty-state">No transcript yet.</div>`;
+    el.insertAdjacentHTML("beforeend", `<div class="empty-state">No transcript yet.</div>`);
     return;
   }
   const speakerNames = {};
-  (currentSession.speakers || []).forEach(sp => { speakerNames[sp.id] = sp.display_name; });
-  el.innerHTML = blocks.map(b => {
+  speakers.forEach(sp => { speakerNames[sp.id] = sp.display_name; });
+  const blocksHtml = blocks.map(b => {
     const mm = Math.floor(b.start / 60);
     const ss = Math.floor(b.start % 60).toString().padStart(2, "0");
     const speaker = b.speaker_id ? `<span class="transcript-speaker">${escapeHtml(speakerNames[b.speaker_id] || b.speaker_id)}:</span>` : "";
     return `<div class="transcript-block"><span class="transcript-time">${mm}:${ss}</span>${speaker}${escapeHtml(b.text)}</div>`;
   }).join("");
+  el.insertAdjacentHTML("beforeend", blocksHtml);
 }
 
 function renderActions() {
@@ -634,6 +657,21 @@ async function regenerateNotes() {
     if (e.message !== "unauthorized") status.textContent = "Error: " + e.message;
   } finally {
     btn.disabled = false;
+  }
+}
+
+// Renaming is the roster enrollment step server-side (see
+// speaker_roster.py) - not just cosmetic here either.
+async function renameSpeaker(speakerId, currentName) {
+  const newName = prompt("Rename speaker:", currentName);
+  if (!newName || !newName.trim() || newName.trim() === currentName) return;
+  try {
+    currentSession = await api(`sessions/${currentSession.id}/speakers/${encodeURIComponent(speakerId)}`, {
+      method: "PATCH", body: JSON.stringify({ display_name: newName.trim() }),
+    });
+    renderTranscript();
+  } catch (e) {
+    if (e.message !== "unauthorized") alert("Error: " + e.message);
   }
 }
 
