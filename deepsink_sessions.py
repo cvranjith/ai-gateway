@@ -34,16 +34,40 @@ itself, not hidden inside router-side secrets.
 """
 
 import base64
+import json
+import threading
+import time
 import uuid
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
+import live_preview
 import session_store
 import user_auth
 from services import deepsink_diarize, deepsink_notes, deepsink_transcribe
 from services.errors import ServiceError
 
 bp = Blueprint("deepsink", __name__, url_prefix="/deepsink")
+
+# Guards the background "auto-regenerate notes after a chunk lands"
+# trigger below - a plain per-session lock, acquired non-blocking: if a
+# regen is already running for this session, a chunk landing mid-way
+# through it just skips starting a second one rather than piling up
+# overlapping Codex calls that could race on which one's result gets
+# written last. Nothing is lost by skipping - the next chunk to land
+# (or an explicit /finish) triggers a fresh regen that covers whatever
+# transcript exists at that point, including what the skipped attempt
+# would have covered.
+_regen_locks_guard = threading.Lock()
+_regen_locks = {}
+
+
+def _regen_lock_for(user_id, session_id):
+    key = (user_id, session_id)
+    with _regen_locks_guard:
+        if key not in _regen_locks:
+            _regen_locks[key] = threading.Lock()
+        return _regen_locks[key]
 
 
 @bp.route("/auth/token", methods=["POST"])
@@ -153,12 +177,42 @@ def upload_chunk(session_id):
         user_id, session_id, chunk_index, file_name, start_offset_seconds, duration_seconds,
         result.get("blocks", []),
     )
+    live_preview.clear(f"{user_id}:{session_id}")
+    # Only when there's actually something to summarize - an empty (or
+    # silent) chunk means an empty transcript, and deepsink_notes treats
+    # that as a real error (marks the session "failed"), which is right
+    # for an explicit /finish with nothing recorded but wrong to trigger
+    # invisibly in the background off a single quiet chunk early in an
+    # otherwise-normal recording.
+    if data["transcript_blocks"]:
+        _trigger_background_regen(user_id, session_id)
     return jsonify(data)
 
 
-def _generate_notes(session_id):
-    user_id = _current_user_id()
-    data = _session_or_404(session_id)
+def _trigger_background_regen(user_id, session_id):
+    # Fires the same notes/action-items regeneration `/finish` and
+    # `/notes/regenerate` trigger explicitly, but automatically after
+    # every chunk - so Notes/Actions "materialize" progressively during
+    # a long recording, not just once at the end. Runs in a background
+    # thread so a chunk upload's own response (which the phone is
+    # actively waiting on to know the chunk landed) doesn't also have to
+    # wait on a Codex call - see the lock above for how overlapping
+    # triggers are handled.
+    lock = _regen_lock_for(user_id, session_id)
+    if not lock.acquire(blocking=False):
+        return
+
+    def run():
+        try:
+            _generate_notes(user_id, session_id)
+        finally:
+            lock.release()
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _generate_notes(user_id, session_id):
+    data = session_store.get_session(user_id, session_id)
     if data is None:
         return None, (jsonify({"error": "not_found"}), 404)
 
@@ -204,7 +258,7 @@ def _generate_notes(session_id):
 @bp.route("/sessions/<session_id>/finish", methods=["POST"])
 @user_auth.require_user
 def finish_session(session_id):
-    data, error_response = _generate_notes(session_id)
+    data, error_response = _generate_notes(_current_user_id(), session_id)
     if error_response is not None:
         return error_response
     return jsonify(data)
@@ -213,7 +267,7 @@ def finish_session(session_id):
 @bp.route("/sessions/<session_id>/notes/regenerate", methods=["POST"])
 @user_auth.require_user
 def regenerate_notes(session_id):
-    data, error_response = _generate_notes(session_id)
+    data, error_response = _generate_notes(_current_user_id(), session_id)
     if error_response is not None:
         return error_response
     return jsonify(data)
@@ -244,6 +298,64 @@ def add_marker(session_id):
     if data is None:
         return jsonify({"error": "not_found"}), 404
     return jsonify(data)
+
+
+# --- Live preview (live_preview.py) - see that module's own docstring.
+# Not part of session_store/session.json on purpose: this is a
+# transient "what's being recognized right now" signal, not durable
+# session state.
+
+@bp.route("/sessions/<session_id>/live_preview", methods=["POST"])
+@user_auth.require_user
+def post_live_preview(session_id):
+    if _session_or_404(session_id) is None:
+        return jsonify({"error": "not_found"}), 404
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "").strip()
+    live_preview.set_text(f"{_current_user_id()}:{session_id}", text)
+    return jsonify({"ok": True})
+
+
+# Polled by the phone on its own schedule to decide whether it's worth
+# pushing live text at all right now - see live_preview.py's docstring.
+@bp.route("/sessions/<session_id>/live_preview/viewers", methods=["GET"])
+@user_auth.require_user
+def get_live_preview_viewers(session_id):
+    return jsonify({"viewers": live_preview.viewer_count(f"{_current_user_id()}:{session_id}")})
+
+
+@bp.route("/sessions/<session_id>/live_preview/stream", methods=["GET"])
+@user_auth.require_user
+def stream_live_preview(session_id):
+    if _session_or_404(session_id) is None:
+        return jsonify({"error": "not_found"}), 404
+    key = f"{_current_user_id()}:{session_id}"
+
+    def generate():
+        live_preview.add_viewer(key)
+        try:
+            last_sent = None
+            while True:
+                text, _ = live_preview.get_text(key)
+                if text != last_sent:
+                    yield f"data: {json.dumps({'text': text})}\n\n"
+                    last_sent = text
+                else:
+                    # SSE comment line, not a data event - just keeps the
+                    # connection alive through any intermediate proxy
+                    # (Caddy/Funnel) that might otherwise time out an
+                    # idle streaming response.
+                    yield ": keep-alive\n\n"
+                time.sleep(1)
+        except GeneratorExit:
+            pass
+        finally:
+            live_preview.remove_viewer(key)
+
+    return Response(generate(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
 
 
 @bp.route("/sessions/<session_id>/diarize", methods=["POST"])

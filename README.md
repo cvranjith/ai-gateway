@@ -109,6 +109,14 @@ GET /ui -> the web dashboard (config editor, /invoke tester, client management)
   transcript text. Configurable: `deepsink_diarize.timeout_seconds`
   (default `1800` — a long meeting genuinely takes a while on CPU).
 
+- `deepsink_chat` — `params: { "transcript": "...", "notes_summary": "...", "background_notes": "...", "question": "..." }`.
+  The web viewer's chat feature — answers one question about one
+  session, grounded only in its own transcript/summary/background, not
+  general knowledge. Same subprocess-Codex pattern as the others.
+  Returns `{ "answer": "..." }`. Configurable: `deepsink_chat.model_id`,
+  `deepsink_chat.codex_timeout_seconds` (default `60`). See
+  `services/deepsink_chat.py`.
+
 ## Adding a new service
 
 1. Create `services/your_service.py` exposing `handle(params: dict) -> dict`.
@@ -192,7 +200,35 @@ POST   /deepsink/sessions/<id>/notes/regenerate                                 
 PATCH  /deepsink/sessions/<id>/action_items/<item_id>  { "is_checked": true|false } -> <session>
 POST   /deepsink/sessions/<id>/markers              { "offset_seconds", "comment" } -> <session>
 POST   /deepsink/sessions/<id>/diarize                                             -> runs deepsink_diarize against all stored chunks, persists speaker-tagged blocks -> <session>
+
+POST   /deepsink/sessions/<id>/live_preview          { "text": "..." }              -> { "ok": true }
+GET    /deepsink/sessions/<id>/live_preview/viewers                                 -> { "viewers": <int> }
+GET    /deepsink/sessions/<id>/live_preview/stream                                  -> text/event-stream, { "text": "..." } per event
 ```
+
+The three `live_preview` routes are a separate, transient thing from
+everything else here — see `live_preview.py`'s own docstring. Not part
+of `session.json`, not durable: it's the phone's rough, still-in-progress
+on-device recognition for whatever chunk hasn't finished uploading yet,
+relayed live to a web viewer's Transcript tab, superseded moments later
+by the real Whisper text once that chunk actually lands via `/chunks`.
+`viewers` is what makes this demand-driven — the phone polls it and only
+starts pushing text once it's non-zero, so recording with nobody
+watching the web page costs nothing extra. `/stream` is Server-Sent
+Events (one-way, browser-native via `EventSource`, no new dependency);
+each connection holds a Flask worker thread for its lifetime, fine at
+personal-app scale.
+
+Notes/action items now also regenerate automatically in the background
+after every chunk lands (not just at `/finish`), so the Notes/Actions
+tabs fill in progressively during a long recording rather than staying
+empty until the end — see `_trigger_background_regen` in
+`deepsink_sessions.py`. Skipped for a chunk with no transcribable
+speech (would otherwise mark the session "failed" for what's really
+just silence), and at most one regen runs per session at a time (a
+non-blocking lock — a chunk landing mid-regen just skips triggering a
+second one; the next chunk, or an explicit `/finish`, covers whatever
+it would have covered).
 
 `<session>` is the full JSON object `session_store.py` maintains — id,
 title, timestamps, `stage` (`recording`|`uploading`|`ready`|`failed` —
