@@ -8,14 +8,19 @@ params:
              of each chunk's audio.
 
 result:
-    {"segments": [{"start": <float>, "end": <float>, "speaker": "SPEAKER_00"}, ...]}
+    {"segments": [{"start": <float>, "end": <float>, "speaker": "SPEAKER_00"}, ...],
+     "embeddings": {"SPEAKER_00": [<float>, ...], ...}}
     Raw diarization output, in session-absolute seconds - NOT merged with
     transcript text. DeepSink already has its own accurately-timestamped
     transcript from Whisper; this only answers "who was probably talking
     when," and the app aligns that against its own transcript blocks by
     time overlap. Keeping this service's output separate from the
     transcript avoids any risk of it subtly duplicating or drifting from
-    text that's already correct.
+    text that's already correct. "embeddings" is one voice-embedding
+    vector per detected speaker (session-local labels, same "SPEAKER_00"
+    keys as "segments") - deepsink_sessions.py persists these alongside
+    the session and uses them for cross-session speaker recognition (see
+    speaker_roster.py) once a speaker is named.
 
 Diarizes a whole session's audio in one pass (not per-chunk) via
 pyannote.audio - a session-relative speaker label like "SPEAKER_00" only
@@ -249,4 +254,6 @@ def handle(params):
             "end": round(segment["end"] + delta, 2),
             "speaker": segment["speaker"],
         })
-    return {"segments": segments}
+    # Embeddings are per-speaker, not per-segment - no time offset to
+    # apply, just pass them through as-is.
+    return {"segments": segments, "embeddings": worker_result.get("embeddings", {})}

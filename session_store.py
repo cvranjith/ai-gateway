@@ -250,3 +250,50 @@ def set_speakers(user_id, session_id, transcript_blocks, speakers):
         data["diarization_error"] = None
         _write(user_id, session_id, data)
         return data
+
+
+def rename_speaker(user_id, session_id, speaker_id, display_name):
+    with _lock_for(user_id, session_id):
+        data = _read(user_id, session_id)
+        if data is None:
+            return None
+        found = False
+        for speaker in data["speakers"]:
+            if speaker["id"] == speaker_id:
+                speaker["display_name"] = display_name
+                found = True
+                break
+        if not found:
+            return None
+        _write(user_id, session_id, data)
+        return data
+
+
+# Per-speaker voice-embedding vectors from the session's last diarization
+# run (deepsink_diarize's "embeddings" result) - kept in their own file
+# alongside session.json rather than as a field on it, since these are
+# only ever needed once, at rename time (to feed speaker_roster.upsert),
+# not something any client (mobile/web) has a reason to fetch on every
+# ordinary session read. Session-local by nature - "SPEAKER_00" only
+# means something within the one diarization run that produced it, so
+# this is overwritten wholesale on every re-diarize, never merged.
+
+def _speaker_embeddings_path(user_id, session_id):
+    return _session_dir(user_id, session_id) / "speaker_embeddings.json"
+
+
+def save_speaker_embeddings(user_id, session_id, embeddings):
+    path = _speaker_embeddings_path(user_id, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".json.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(embeddings, f)
+    tmp_path.replace(path)
+
+
+def load_speaker_embeddings(user_id, session_id):
+    path = _speaker_embeddings_path(user_id, session_id)
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        return json.load(f)

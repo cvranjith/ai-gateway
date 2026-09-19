@@ -35,6 +35,7 @@ itself, not hidden inside router-side secrets.
 
 import base64
 import json
+import re
 import threading
 import time
 import uuid
@@ -43,6 +44,7 @@ from flask import Blueprint, Response, jsonify, request
 
 import live_preview
 import session_store
+import speaker_roster
 import user_auth
 from services import deepsink_diarize, deepsink_notes, deepsink_transcribe
 from services.errors import ServiceError
@@ -383,18 +385,50 @@ def diarize_session(session_id):
         session_store.update_session(user_id, session_id, is_diarizing=False, diarization_error=e.message)
         return jsonify({"error": e.message}), e.status_code
 
+    embeddings = result.get("embeddings", {})
+    session_store.save_speaker_embeddings(user_id, session_id, embeddings)
+
     updated_blocks, speakers = _apply_diarization(
-        data["transcript_blocks"], result.get("segments", []), data.get("speakers") or []
+        data["transcript_blocks"], result.get("segments", []), data.get("speakers") or [], user_id, embeddings
     )
     updated = session_store.set_speakers(user_id, session_id, updated_blocks, speakers)
     return jsonify(updated)
+
+
+@bp.route("/sessions/<session_id>/speakers/<speaker_id>", methods=["PATCH"])
+@user_auth.require_user
+def rename_speaker(session_id, speaker_id):
+    user_id = _current_user_id()
+    body = request.get_json(silent=True) or {}
+    display_name = (body.get("display_name") or "").strip()
+    if not display_name:
+        return jsonify({"error": "missing 'display_name'"}), 400
+
+    data = session_store.rename_speaker(user_id, session_id, speaker_id, display_name)
+    if data is None:
+        return jsonify({"error": "not_found"}), 404
+
+    # Naming a speaker IS the roster enrollment step - see
+    # speaker_roster.py's own docstring. This session's own diarization
+    # run is the only place that embedding exists; a future session
+    # re-diarized after this checks the roster and can auto-apply this
+    # same name instead of a fresh "Person N".
+    embeddings = session_store.load_speaker_embeddings(user_id, session_id)
+    embedding = embeddings.get(speaker_id)
+    if embedding:
+        speaker_roster.upsert(user_id, display_name, embedding)
+
+    return jsonify(data)
+
+
+_AUTO_SPEAKER_NAME_RE = re.compile(r"^Person \d+$")
 
 
 # Same time-overlap assignment DeepSink's mobile app used to do locally
 # (SpeakerDiarization.assign/defaultSpeakers) - reimplemented here since
 # diarization is now a server-side write, not something the client
 # merges into its own copy.
-def _apply_diarization(blocks, segments, previous_speakers):
+def _apply_diarization(blocks, segments, previous_speakers, user_id, embeddings):
     previous_names = {s["id"]: s["display_name"] for s in previous_speakers}
     updated_blocks = []
     for block in blocks:
@@ -416,8 +450,21 @@ def _apply_diarization(blocks, segments, previous_speakers):
         sid = block.get("speaker_id")
         if sid and sid not in seen_order:
             seen_order.append(sid)
-    speakers = [
-        {"id": sid, "display_name": previous_names.get(sid, f"Person {i + 1}")}
-        for i, sid in enumerate(seen_order)
-    ]
+
+    speakers = []
+    for i, sid in enumerate(seen_order):
+        previous = previous_names.get(sid)
+        if previous and not _AUTO_SPEAKER_NAME_RE.match(previous):
+            # A real, user-confirmed name (a previous rename on this
+            # exact session, e.g. re-running Detect Speakers after an
+            # edit) - keep it, don't let a roster match override a name
+            # the user already chose for this speaker in this session.
+            display_name = previous
+        else:
+            # Still just an auto-assigned placeholder (or first time
+            # seeing this speaker) - always worth a fresh roster check,
+            # since the roster can grow between one Detect Speakers run
+            # and the next even for the same session.
+            display_name = speaker_roster.match(user_id, embeddings.get(sid)) or f"Person {i + 1}"
+        speakers.append({"id": sid, "display_name": display_name})
     return updated_blocks, speakers

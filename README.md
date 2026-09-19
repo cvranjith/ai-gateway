@@ -200,6 +200,7 @@ POST   /deepsink/sessions/<id>/notes/regenerate                                 
 PATCH  /deepsink/sessions/<id>/action_items/<item_id>  { "is_checked": true|false } -> <session>
 POST   /deepsink/sessions/<id>/markers              { "offset_seconds", "comment" } -> <session>
 POST   /deepsink/sessions/<id>/diarize                                             -> runs deepsink_diarize against all stored chunks, persists speaker-tagged blocks -> <session>
+PATCH  /deepsink/sessions/<id>/speakers/<speaker_id>  { "display_name": "..." }     -> <session>
 
 POST   /deepsink/sessions/<id>/live_preview          { "text": "..." }              -> { "ok": true }
 GET    /deepsink/sessions/<id>/live_preview/viewers                                 -> { "viewers": <int> }
@@ -229,6 +230,40 @@ just silence), and at most one regen runs per session at a time (a
 non-blocking lock — a chunk landing mid-regen just skips triggering a
 second one; the next chunk, or an explicit `/finish`, covers whatever
 it would have covered).
+
+### Cross-session speaker recognition
+
+`deepsink_diarize` now also returns a voice-embedding vector per
+detected speaker (`diarize_worker.py`, reading pyannote's own
+`DiarizeOutput.speaker_embeddings` — confirmed by reading its source
+that these rows are already re-ordered to match the speaker labels, so
+no extra bookkeeping is needed to pair them up). `/diarize` persists
+these per-session (`session_store.py`'s `save_speaker_embeddings` —
+their own file alongside `session.json`, not a field on it: they're
+only ever needed once, at rename time, not something any client has a
+reason to fetch on an ordinary session read).
+
+`PATCH /sessions/<id>/speakers/<speaker_id>` (the rename endpoint
+above) is the enrollment step — there's no separate "add a person" flow.
+Renaming "Person 1" to a real name saves that name's embedding into a
+small per-user roster (`speaker_roster.py`, `sessions_data/<user_id>/
+speaker_roster.json` — repeated renames of the same name average into
+one running embedding, more robust than trusting a single session
+alone). Every later `/diarize` call — on that session again, or any
+other — checks each not-yet-manually-named speaker against the roster
+by cosine similarity and auto-applies a match instead of a fresh
+"Person N"; a speaker the user has actually renamed (as opposed to
+still carrying an auto-assigned "Person N" from last time) is never
+overridden by a roster match. Brute-force similarity against the whole
+roster on every call, deliberately — a personal app's own regulars are
+tens of people, not thousands, so no vector index is needed.
+
+The match threshold (`speaker_roster.similarity_threshold` in
+`config.properties`/the `/ui` config editor, default `0.5`) is a
+starting point, not a calibrated value — checked by hand against one
+real pair of short recordings of the same person (~0.61 cosine
+similarity), not a proper labeled dataset. Raise it if wrong names
+start getting applied, lower it if genuine matches are being missed.
 
 `<session>` is the full JSON object `session_store.py` maintains — id,
 title, timestamps, `stage` (`recording`|`uploading`|`ready`|`failed` —

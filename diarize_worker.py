@@ -20,10 +20,13 @@ Usage:
     HF_TOKEN=<token> must be set in the environment (not passed as an
     argument, to keep it out of `ps`/process-list output).
 
-stdout on success: {"segments": [{"start": <float>, "end": <float>, "speaker": "SPEAKER_00"}, ...]}
+stdout on success: {"segments": [{"start": <float>, "end": <float>, "speaker": "SPEAKER_00"}, ...],
+                     "embeddings": {"SPEAKER_00": [<float>, ...], ...}}
     (times are relative to <wav_path>'s own timeline — the caller maps
     them back to session-absolute time, since only it knows how the
-    chunks it concatenated into that one file line up.)
+    chunks it concatenated into that one file line up. "embeddings" is
+    one fixed-size voice-embedding vector per detected speaker in this
+    session, for cross-session recognition — see speaker_roster.py.)
 
 Exit 0 + that JSON on stdout on success. Exit 1 + a plain-text message on
 stderr on failure — same convention services/*.py's own subprocess calls
@@ -74,7 +77,20 @@ def main():
         {"start": round(turn.start, 2), "end": round(turn.end, 2), "speaker": speaker}
         for turn, _, speaker in diarization.itertracks(yield_label=True)
     ]
-    print(json.dumps({"segments": segments}))
+
+    # `speaker_embeddings` rows are already re-ordered by pyannote itself
+    # to match `speaker_diarization.labels()` (confirmed by reading
+    # SpeakerDiarization.apply's own source - the `centroids = centroids[...]`
+    # re-indexing step right before it builds DiarizeOutput), so zipping
+    # them together here is safe. `exclusive_speaker_diarization` shares
+    # the same label set (same speakers, just overlap-excluded), so this
+    # covers every speaker `segments` above can reference.
+    embeddings = {}
+    if output.speaker_embeddings is not None:
+        for label, vector in zip(output.speaker_diarization.labels(), output.speaker_embeddings):
+            embeddings[label] = [round(float(x), 6) for x in vector]
+
+    print(json.dumps({"segments": segments, "embeddings": embeddings}))
     return 0
 
 
