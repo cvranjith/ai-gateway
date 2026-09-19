@@ -112,6 +112,18 @@ def create_session(user_id, title, started_at=None):
         "is_diarizing": False,
         "diarization_error": None,
         "is_generating_notes": False,
+        # Deliberately separate from `stage`: stage can now cycle
+        # through uploading/ready multiple times *during* one ongoing
+        # recording (progressive notes regen after every chunk - see
+        # _trigger_background_regen), so "stage == ready" stopped
+        # reliably meaning "recording has stopped" the moment that
+        # feature shipped. This is the real signal for that - true from
+        # creation (or a Resume Recording PATCH) until /finish actually
+        # runs, full stop, regardless of how many times stage flips in
+        # between. live_preview's viewer-facing gating and the web
+        # viewer's live-stream subscription both key off this now, not
+        # stage.
+        "is_recording": True,
     }
     with _lock_for(user_id, session_id):
         _write(user_id, session_id, data)

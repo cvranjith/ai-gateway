@@ -132,17 +132,18 @@ def patch_session(session_id):
     # transition) - Resume Recording (DeepSink's mobile app) continues
     # an already-"ready" session's recording, and nothing server-side
     # would otherwise know that's happened until its first new chunk
-    # actually uploads. Until then, live_preview's viewer-facing gating
-    # and the web viewer's progressive-polling both key off stage being
-    # "recording"/"uploading" - without this, resuming a finished
-    # session would silently look non-live for however long the first
-    # new chunk takes to land. Restricted to exactly "recording" so this
-    # can't be used to fake any other transition (e.g. "ready" without
-    # real notes).
+    # actually uploads. Restricted to exactly "recording" so this can't
+    # be used to fake any other transition (e.g. "ready" without real
+    # notes). Also flips is_recording back to True in the same write -
+    # see that field's own comment in session_store.py for why that,
+    # not stage, is what live_preview/the web viewer's live-stream
+    # actually key off.
     allowed = {"title", "background_notes", "duration_seconds", "recording_incomplete", "stage"}
     fields = {k: v for k, v in body.items() if k in allowed}
-    if "stage" in fields and fields["stage"] != "recording":
-        return jsonify({"error": "'stage' can only be set to 'recording' via this endpoint"}), 400
+    if "stage" in fields:
+        if fields["stage"] != "recording":
+            return jsonify({"error": "'stage' can only be set to 'recording' via this endpoint"}), 400
+        fields["is_recording"] = True
     if not fields:
         return jsonify({"error": "no updatable fields in body"}), 400
     data = session_store.update_session(_current_user_id(), session_id, **fields)
@@ -283,6 +284,14 @@ def _generate_notes(user_id, session_id):
 @user_auth.require_user
 def finish_session(session_id):
     user_id = _current_user_id()
+    # Unconditionally, before notes even run, and regardless of whether
+    # they succeed - /finish is the one call that only ever happens
+    # because the user actually tapped Stop, so this is the real,
+    # canonical "recording has stopped" signal (see is_recording's own
+    # comment in session_store.py). Deliberately not folded into
+    # _generate_notes itself: that function also runs from the
+    # per-chunk background trigger, which must NOT touch this.
+    session_store.update_session(user_id, session_id, is_recording=False)
     data, error_response = _generate_notes(user_id, session_id)
     if error_response is not None:
         return error_response

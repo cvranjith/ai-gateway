@@ -434,7 +434,7 @@ async function loadSession(id) {
     // it's still live doesn't get yanked back.
     if (!hasSetInitialTab) {
       hasSetInitialTab = true;
-      showTab(isLiveStage(currentSession.stage) ? "transcript" : "notes");
+      showTab(isLive(currentSession) ? "transcript" : "notes");
     }
     renderDetail();
   } catch (e) {
@@ -465,8 +465,18 @@ function renderDetail() {
   updateLiveStream();
 }
 
-function isLiveStage(stage) {
-  return stage === "recording" || stage === "uploading";
+// NOT stage-based (used to be `stage === "recording" || "uploading"`) -
+// stage can now cycle through uploading/ready multiple times *during*
+// one ongoing recording (progressive notes regen after every chunk),
+// so it stopped reliably meaning "still being recorded" the moment
+// that shipped - confirmed the hard way: the live stream was closing
+// itself the moment the first chunk's notes finished, even though
+// recording was still very much in progress. is_recording is the real
+// signal (see session_store.py's own comment) - true from creation
+// until /finish actually runs, independent of how many times stage
+// flips in between.
+function isLive(session) {
+  return !!session.is_recording;
 }
 
 // Deliberately NOT gated on the session's last-known stage - that was
@@ -510,7 +520,7 @@ function stopPolling() {
 // demand-driven too rather than leaving an EventSource open on every
 // tab/session regardless of whether its content is ever shown.
 function updateLiveStream() {
-  const shouldStream = currentTab === "transcript" && currentSession && isLiveStage(currentSession.stage);
+  const shouldStream = currentTab === "transcript" && currentSession && isLive(currentSession);
   if (shouldStream && !liveEventSource) {
     // Token as a query param, not the usual Authorization header this
     // page uses everywhere else (api()) - confirmed the hard way (a
