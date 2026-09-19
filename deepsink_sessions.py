@@ -126,8 +126,23 @@ def patch_session(session_id):
     # the only fields a client legitimately sets directly; everything
     # else (notes, transcript, action items, speakers) only ever changes
     # through its own purpose-built endpoint below.
-    allowed = {"title", "background_notes", "duration_seconds", "recording_incomplete"}
+    #
+    # "stage" is the one deliberate exception to "the server always
+    # decides stage" (append_chunk/save_notes normally own every other
+    # transition) - Resume Recording (DeepSink's mobile app) continues
+    # an already-"ready" session's recording, and nothing server-side
+    # would otherwise know that's happened until its first new chunk
+    # actually uploads. Until then, live_preview's viewer-facing gating
+    # and the web viewer's progressive-polling both key off stage being
+    # "recording"/"uploading" - without this, resuming a finished
+    # session would silently look non-live for however long the first
+    # new chunk takes to land. Restricted to exactly "recording" so this
+    # can't be used to fake any other transition (e.g. "ready" without
+    # real notes).
+    allowed = {"title", "background_notes", "duration_seconds", "recording_incomplete", "stage"}
     fields = {k: v for k, v in body.items() if k in allowed}
+    if "stage" in fields and fields["stage"] != "recording":
+        return jsonify({"error": "'stage' can only be set to 'recording' via this endpoint"}), 400
     if not fields:
         return jsonify({"error": "no updatable fields in body"}), 400
     data = session_store.update_session(_current_user_id(), session_id, **fields)

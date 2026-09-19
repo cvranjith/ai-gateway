@@ -29,6 +29,7 @@ on every chunk.
 
 import base64
 import os
+import subprocess
 import tempfile
 
 import whisper
@@ -51,6 +52,28 @@ def _load_model(model_id, device):
     if key not in _MODELS:
         _MODELS[key] = whisper.load_model(model_id, device=device)
     return _MODELS[key]
+
+
+def _probe_duration_seconds(path):
+    # Real, observed failure mode (a user's own "Live Transcript Test"
+    # session, chunk 1): a 24.7s chunk came back with segments timestamped
+    # out to 86.5s, the tail entirely a hallucinated loop of the same
+    # phrase repeated ~30 times. Whisper's segment timestamps aren't
+    # reliably bounded by the actual input length once it starts
+    # hallucinating past real content, so this is a hard backstop -
+    # independent of however well condition_on_previous_text=False below
+    # reduces the hallucination itself. Best-effort: if ffprobe fails for
+    # any reason, returns None and the clamp below is simply skipped
+    # rather than failing the whole transcription over it.
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(result.stdout.strip())
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return None
 
 
 def handle(params):
@@ -85,12 +108,27 @@ def handle(params):
         # fp16=False: this runs on CPU by default (no CUDA here); asking
         # for fp32 up front skips whisper's noisy "FP16 is not supported
         # on CPU" warning rather than triggering then ignoring it.
-        result = model.transcribe(path, fp16=False)
+        #
+        # condition_on_previous_text=False: whisper's own default feeds
+        # each window's output back in as context for the next one, which
+        # is exactly the mechanism behind a well-documented failure mode -
+        # once it mis-hears something (typically near silence, a short/
+        # quiet chunk being the common trigger), it can spiral into
+        # repeating that same phrase over and over, each repetition
+        # "confirmed" by the last one being fed back as context. Confirmed
+        # the hard way on a real chunk: 24.7s of actual audio came back
+        # with segments timestamped out to 86.5s, the tail ~30 repeats of
+        # the same six words. Disabling this makes every window decode
+        # independently, breaking that feedback loop - the audio_duration
+        # clamp below is the second, independent layer of defense in case
+        # it still happens.
+        result = model.transcribe(path, fp16=False, condition_on_previous_text=False)
     except ServiceError:
         raise
     except Exception as e:
         raise ServiceError(f"transcription failed: {e}", 502)
     finally:
+        audio_duration = _probe_duration_seconds(path)
         try:
             os.unlink(path)
         except OSError:
@@ -101,9 +139,18 @@ def handle(params):
         text = (segment.get("text") or "").strip()
         if not text:
             continue
+        seg_start = segment["start"]
+        seg_end = segment["end"]
+        if audio_duration is not None:
+            if seg_start >= audio_duration:
+                # Starts entirely past the real audio - not a segment
+                # that ran slightly long, pure hallucination. Drop it
+                # rather than keep a whole fabricated sentence.
+                continue
+            seg_end = min(seg_end, audio_duration)
         blocks.append({
-            "start": round(segment["start"] + start_offset, 2),
-            "end": round(segment["end"] + start_offset, 2),
+            "start": round(seg_start + start_offset, 2),
+            "end": round(seg_end + start_offset, 2),
             "text": text,
         })
 
