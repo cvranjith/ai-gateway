@@ -144,6 +144,22 @@
   .notes-section p, .notes-section ul { margin: 0; font-size: 14px; line-height: 1.5; }
   .notes-section ul { padding-left: 18px; }
   .empty-state { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+
+  .live-line {
+    margin-top: 8px;
+    padding: 8px 0 0;
+    font-size: 14px;
+    font-style: italic;
+    color: var(--muted);
+    border-top: 1px dashed var(--border);
+  }
+  .live-line::before { content: "● live — "; color: var(--danger); font-style: normal; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
+
+  .chat-entry { margin-bottom: 14px; }
+  .chat-entry:last-child { margin-bottom: 0; }
+  .chat-q { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  .chat-a { font-size: 14px; line-height: 1.5; }
+  .chat-a ul { margin: 4px 0 0; padding-left: 18px; }
 </style>
 </head>
 <body>
@@ -202,6 +218,7 @@
       <div class="tab" data-tab="transcript" onclick="showTab('transcript')">Transcript</div>
       <div class="tab" data-tab="actions" onclick="showTab('actions')">Actions</div>
       <div class="tab" data-tab="background" onclick="showTab('background')">Background</div>
+      <div class="tab" data-tab="chat" onclick="showTab('chat')">Chat</div>
     </div>
 
     <div id="tab-notes" class="tab-panel">
@@ -217,6 +234,7 @@
     <div id="tab-transcript" class="tab-panel" hidden>
       <div class="card">
         <div id="transcript-content"></div>
+        <div id="live-line" class="live-line" hidden></div>
         <div class="actions">
           <button class="secondary" onclick="diarizeSession()" id="diarize-btn">Detect Speakers</button>
           <span id="diarize-status" class="hint"></span>
@@ -241,6 +259,24 @@
       </div>
     </div>
 
+    <div id="tab-chat" class="tab-panel" hidden>
+      <div class="card">
+        <div id="chat-log"></div>
+        <div class="row" style="margin-top:10px">
+          <div>
+            <label for="chat-question">Ask a question about this session</label>
+            <input id="chat-question" placeholder="What did we decide about X?" onkeydown="if(event.key==='Enter'){askChat()}">
+          </div>
+          <button onclick="askChat()" id="chat-ask-btn">Ask</button>
+        </div>
+        <div class="actions">
+          <button class="secondary" onclick="quickArticulate()" id="articulate-btn">Articulate</button>
+          <span id="chat-status" class="hint"></span>
+        </div>
+        <div class="hint" style="margin-top:10px">Grounded only in this session's own transcript and background notes — not a general-purpose assistant.</div>
+      </div>
+    </div>
+
     <div class="actions">
       <button class="danger" onclick="deleteSession()">Delete Session</button>
     </div>
@@ -251,6 +287,10 @@
 <script>
 const TOKEN_KEY = "deepsink_token";
 let currentSession = null;
+let currentTab = "notes";
+let liveEventSource = null;
+let pollTimer = null;
+let chatBusy = false;
 
 function getToken() { return sessionStorage.getItem(TOKEN_KEY); }
 function setToken(t) { sessionStorage.setItem(TOKEN_KEY, t); }
@@ -266,6 +306,8 @@ function showLogin(message) {
 
 function showList() {
   currentSession = null;
+  stopPolling();
+  closeLiveStream();
   document.getElementById("login-screen").hidden = true;
   document.getElementById("detail-view").hidden = true;
   document.getElementById("list-view").hidden = false;
@@ -276,6 +318,8 @@ function showDetail(id) {
   document.getElementById("login-screen").hidden = true;
   document.getElementById("list-view").hidden = true;
   document.getElementById("detail-view").hidden = false;
+  document.getElementById("chat-log").innerHTML = "";
+  showTab("notes");
   loadSession(id);
 }
 
@@ -400,6 +444,87 @@ function renderDetail() {
   renderTranscript();
   renderActions();
   document.getElementById("background-textarea").value = s.background_notes || "";
+
+  // Both of these look at the session's current stage, which can change
+  // between one render and the next (a poll tick, a chunk landing) - so
+  // re-evaluate on every render rather than only when a tab is clicked
+  // or a session is first opened. Both are idempotent/no-ops when
+  // nothing actually needs to change.
+  updatePollingForSession();
+  updateLiveStream();
+}
+
+function isLiveStage(stage) {
+  return stage === "recording" || stage === "uploading";
+}
+
+// While a session is still being recorded/uploaded, the transcript,
+// notes, and action items can all keep changing server-side (a chunk
+// landing, the background auto-regen it triggers) with nothing on this
+// page to push those changes to a *viewer* the way live_preview does
+// for the rough in-progress text - so this just re-fetches on a plain
+// timer instead. Stops itself once the session reaches "ready"/"failed"
+// (see the call at the end of renderDetail), since nothing more is
+// expected to change at that point.
+function updatePollingForSession() {
+  const shouldPoll = currentSession && isLiveStage(currentSession.stage);
+  if (shouldPoll && !pollTimer) {
+    pollTimer = setInterval(async () => {
+      if (!currentSession) return;
+      try {
+        const latest = await api("sessions/" + currentSession.id);
+        currentSession = latest;
+        renderDetail();
+      } catch (e) {
+        if (e.message === "unauthorized") stopPolling();
+      }
+    }, 5000);
+  } else if (!shouldPoll && pollTimer) {
+    stopPolling();
+  }
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+// Only subscribes while BOTH conditions hold: the Transcript tab is the
+// one actually showing, and the session is still live (recording/
+// uploading) - exactly the "smart" gating asked for. viewer_count on
+// the server side is what makes the phone's own push behavior demand-
+// driven; this is the other half, making the subscription itself
+// demand-driven too rather than leaving an EventSource open on every
+// tab/session regardless of whether its content is ever shown.
+function updateLiveStream() {
+  const shouldStream = currentTab === "transcript" && currentSession && isLiveStage(currentSession.stage);
+  if (shouldStream && !liveEventSource) {
+    liveEventSource = new EventSource("sessions/" + currentSession.id + "/live_preview/stream");
+    liveEventSource.onmessage = (evt) => {
+      try {
+        renderLiveLine((JSON.parse(evt.data).text || ""));
+      } catch (e) { /* ignore a malformed event, keep the stream open */ }
+    };
+    // EventSource retries on its own after a drop - nothing to do here
+    // beyond not treating a transient error as fatal to the page.
+    liveEventSource.onerror = () => {};
+  } else if (!shouldStream && liveEventSource) {
+    closeLiveStream();
+  }
+}
+
+function closeLiveStream() {
+  if (liveEventSource) {
+    liveEventSource.close();
+    liveEventSource = null;
+  }
+  renderLiveLine("");
+}
+
+function renderLiveLine(text) {
+  const el = document.getElementById("live-line");
+  if (!el) return;
+  el.hidden = !text;
+  el.textContent = text;
 }
 
 function renderNotes() {
@@ -455,8 +580,10 @@ function renderActions() {
 }
 
 function showTab(name) {
+  currentTab = name;
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
   document.querySelectorAll(".tab-panel").forEach(p => p.hidden = p.id !== "tab-" + name);
+  updateLiveStream();
 }
 
 async function saveTitle() {
@@ -534,6 +661,101 @@ async function deleteSession() {
     showList();
   } catch (e) {
     if (e.message !== "unauthorized") alert("Error: " + e.message);
+  }
+}
+
+// A sibling of "sessions" etc. one level up: this page lives at
+// ".../deepsink/ui", so "sessions" resolves to ".../deepsink/sessions"
+// (see api() above) while "../invoke" resolves to ".../invoke" - the
+// same relative-resolution trick, just popping out of the "/deepsink/"
+// directory instead of staying in it. ai-gateway's /invoke accepts this
+// page's DeepSink login token same as /deepsink/* does (see
+// gateway.py's require_client_or_user), so no separate credential is
+// needed here.
+async function invoke(serviceId, params) {
+  const token = getToken();
+  const res = await fetch("../invoke", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+    body: JSON.stringify({ service_id: serviceId, params }),
+  });
+  if (res.status === 401) {
+    clearToken();
+    showLogin("Session expired — sign in again.");
+    throw new Error("unauthorized");
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+  return body.result;
+}
+
+function transcriptText() {
+  const blocks = (currentSession.transcript_blocks || []).slice().sort((a, b) => a.start - b.start);
+  return blocks.map(b => b.text).join(" ");
+}
+
+function appendChatEntry(label, answerHtml) {
+  const log = document.getElementById("chat-log");
+  const entry = document.createElement("div");
+  entry.className = "chat-entry";
+  entry.innerHTML = `<div class="chat-q">${escapeHtml(label)}</div><div class="chat-a">${answerHtml}</div>`;
+  log.appendChild(entry);
+  log.scrollIntoView({ block: "end", behavior: "smooth" });
+}
+
+async function askChat() {
+  const input = document.getElementById("chat-question");
+  const question = input.value.trim();
+  const status = document.getElementById("chat-status");
+  if (!question || chatBusy) return;
+  const transcript = transcriptText();
+  if (!transcript) { status.textContent = "No transcript yet to ask about."; return; }
+
+  chatBusy = true;
+  document.getElementById("chat-ask-btn").disabled = true;
+  input.value = "";
+  status.textContent = "";
+  try {
+    const result = await invoke("deepsink_chat", {
+      transcript,
+      notes_summary: (currentSession.notes && currentSession.notes.summary) || "",
+      background_notes: currentSession.background_notes || "",
+      question,
+    });
+    appendChatEntry(question, escapeHtml(result.answer || ""));
+  } catch (e) {
+    if (e.message !== "unauthorized") appendChatEntry(question, `<span class="error">${escapeHtml(e.message)}</span>`);
+  } finally {
+    chatBusy = false;
+    document.getElementById("chat-ask-btn").disabled = false;
+  }
+}
+
+async function quickArticulate() {
+  const status = document.getElementById("chat-status");
+  if (chatBusy) return;
+  const transcript = transcriptText();
+  if (!transcript) { status.textContent = "No transcript yet."; return; }
+
+  chatBusy = true;
+  const btn = document.getElementById("articulate-btn");
+  btn.disabled = true;
+  status.textContent = "Articulating…";
+  try {
+    const result = await invoke("deepsink_articulate", {
+      transcript,
+      background_notes: currentSession.background_notes || "",
+    });
+    const bulletsHtml = (result.bullets || []).length
+      ? `<ul>${result.bullets.map(b => `<li>${escapeHtml(b)}</li>`).join("")}</ul>` : "";
+    const speechHtml = result.speech ? `<p style="margin-top:6px">${escapeHtml(result.speech)}</p>` : "";
+    appendChatEntry("Articulate", bulletsHtml + speechHtml);
+    status.textContent = "";
+  } catch (e) {
+    if (e.message !== "unauthorized") status.textContent = "Error: " + e.message;
+  } finally {
+    chatBusy = false;
+    btn.disabled = false;
   }
 }
 

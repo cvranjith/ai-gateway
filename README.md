@@ -248,24 +248,44 @@ other.
 
 ### Web viewer
 
-`GET /deepsink/ui` serves a small session browser (`static/deepsink.html`,
+`GET /deepsink/ui` serves a session browser (`static/deepsink.html`,
 same no-build-step, single-file style as `/ui` above) — sign in with the
-DeepSink user login, browse/search sessions, edit the title and
-background notes, view Notes/Transcript/Actions tabs, toggle action
-items, regenerate notes, run Detect Speakers, delete a session, or
-start a new one (title only — actual recording is phone-only). Its own
-JS calls every endpoint above as a *relative* path (`"sessions"`,
-`"auth/token"`, ...), so it resolves correctly whether the page is
-loaded from the Mac's LAN address or through the Funnel's `/gateway`
-prefix, with no base-URL logic of its own to maintain. Read-only against
-the same session data the phone writes — nothing here changes what "the
-server is the source of truth" means, this is just another renderer of
-it, same as the phone.
+DeepSink user login, browse sessions, edit the title and background
+notes, toggle action items, regenerate notes, run Detect Speakers,
+delete a session, or start a new one (title only — actual recording is
+phone-only). Its own JS calls every session endpoint above as a
+*relative* path (`"sessions"`, `"auth/token"`, ...), so it resolves
+correctly whether the page is loaded from the Mac's LAN address or
+through the Funnel's `/gateway` prefix, with no base-URL logic of its
+own to maintain.
 
-Deliberately doesn't (yet): live transcript while a phone recording is
-in progress, resuming a finished session's recording, or a chat/Q&A
-interface over a session's content — each is a separate, larger piece
-of work than this first pass covers.
+**Live transcript**: while a session is `recording`/`uploading`, opening
+its Transcript tab subscribes to `/live_preview/stream` (see that
+section above) and shows the phone's rough, still-in-progress text in a
+lighter, dashed-off style below the real transcript — gone the moment
+the corresponding chunk actually lands (the real Whisper text takes its
+place via the plain session refetch below). The subscription itself is
+gated exactly the same way the phone's push is: only open while this
+tab is the one actually showing, closed otherwise (leaving a tab,
+closing a session, navigating away).
+
+**Progressive updates**: also while `recording`/`uploading`, the whole
+page polls the session every 5s and re-renders — the same "server
+returns the full session, client just replaces what it's showing"
+contract the phone uses, just on a timer instead of triggered by a
+write. Stops itself once the session reaches `ready`/`failed`.
+
+**Chat tab**: a question in, a grounded answer out (`deepsink_chat`,
+via `/invoke` — see that service's own entry above), plus a quick
+"Articulate" button (`deepsink_articulate`, fed the session's transcript
+so far rather than a live on-device excerpt). Both call `../invoke`
+(one level up from where `"sessions"` resolves) with this same login
+token — `/invoke` accepts it as an alternative to client-credentials
+(see "Auth" above), so no separate credential is needed here either.
+
+Resuming a finished session's recording is mobile-only (recording
+itself only ever happens on the phone) — see DeepSink's own README/
+commit history for that piece.
 
 ## Config
 
