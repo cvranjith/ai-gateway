@@ -99,7 +99,15 @@ def _session_or_404(session_id):
 def create_session():
     body = request.get_json(silent=True) or {}
     title = (body.get("title") or "").strip() or "Untitled session"
-    data = session_store.create_session(_current_user_id(), title=title, started_at=body.get("started_at"))
+    # Defaults to False - a plain "create a session" call (the web
+    # viewer's own "+ New Session," title-only, nothing attached to it
+    # yet) should never come back looking like it's already being
+    # recorded. DeepSink's mobile app passes true explicitly, since it
+    # only ever calls this as part of immediately starting to record.
+    is_recording = bool(body.get("is_recording"))
+    data = session_store.create_session(
+        _current_user_id(), title=title, started_at=body.get("started_at"), is_recording=is_recording
+    )
     return jsonify(data), 201
 
 

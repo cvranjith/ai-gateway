@@ -87,7 +87,7 @@ def _write(user_id, session_id, data):
     tmp_path.replace(path)
 
 
-def create_session(user_id, title, started_at=None):
+def create_session(user_id, title, started_at=None, is_recording=False):
     session_id = str(uuid.uuid4())
     data = {
         "id": session_id,
@@ -95,7 +95,15 @@ def create_session(user_id, title, started_at=None):
         "started_at": started_at or _now(),
         "duration_seconds": 0,
         "background_notes": "",
-        "stage": "recording",
+        # "ready" (an empty, nothing-pending session - a true, if
+        # slightly vacuous, description) rather than "recording" for a
+        # session nobody's actually recording yet - e.g. one prepared
+        # ahead of time from the web viewer, title-only, no phone
+        # attached to it at all. DeepSink's own mobile app is the one
+        # caller that passes is_recording=True (see below), since it
+        # only ever creates a session as part of actually starting to
+        # record into it immediately.
+        "stage": "recording" if is_recording else "ready",
         "chunks_done": 0,
         "chunks_total": 0,
         "failure_reason": None,
@@ -123,7 +131,7 @@ def create_session(user_id, title, started_at=None):
         # between. live_preview's viewer-facing gating and the web
         # viewer's live-stream subscription both key off this now, not
         # stage.
-        "is_recording": True,
+        "is_recording": is_recording,
     }
     with _lock_for(user_id, session_id):
         _write(user_id, session_id, data)
