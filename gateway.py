@@ -95,6 +95,19 @@ def ui():
     return app.send_static_file("index.html")
 
 
+@app.route("/deepsink/ui")
+def deepsink_ui():
+    # A separate page from /ui above (that one's the gateway's own admin
+    # dashboard - config/clients, client-credentials login) - this one's
+    # a DeepSink session viewer for the DeepSink user login instead. Its
+    # own JS calls "sessions", "auth/token", etc. as *relative* paths, so
+    # they resolve against this page's own URL (".../deepsink/ui") to
+    # ".../deepsink/sessions" etc. correctly whether reached via the LAN
+    # address or the Funnel URL's extra "/gateway" prefix - no base-URL
+    # logic needed here the way the phone app needs.
+    return app.send_static_file("deepsink.html")
+
+
 @app.route("/oauth/token", methods=["POST"])
 def oauth_token():
     body = request.get_json(silent=True) or {}

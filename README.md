@@ -210,6 +210,27 @@ and two requests for the same session (e.g. two chunk uploads landing
 close together) can genuinely race. Different sessions never block each
 other.
 
+### Web viewer
+
+`GET /deepsink/ui` serves a small session browser (`static/deepsink.html`,
+same no-build-step, single-file style as `/ui` above) — sign in with the
+DeepSink user login, browse/search sessions, edit the title and
+background notes, view Notes/Transcript/Actions tabs, toggle action
+items, regenerate notes, run Detect Speakers, delete a session, or
+start a new one (title only — actual recording is phone-only). Its own
+JS calls every endpoint above as a *relative* path (`"sessions"`,
+`"auth/token"`, ...), so it resolves correctly whether the page is
+loaded from the Mac's LAN address or through the Funnel's `/gateway`
+prefix, with no base-URL logic of its own to maintain. Read-only against
+the same session data the phone writes — nothing here changes what "the
+server is the source of truth" means, this is just another renderer of
+it, same as the phone.
+
+Deliberately doesn't (yet): live transcript while a phone recording is
+in progress, resuming a finished session's recording, or a chat/Q&A
+interface over a session's content — each is a separate, larger piece
+of work than this first pass covers.
+
 ## Config
 
 Per-service and gateway-wide parameters live in `config.properties`

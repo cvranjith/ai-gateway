@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSink</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f7;
+    --card: #ffffff;
+    --text: #1c1c1e;
+    --muted: #6e6e73;
+    --border: #e0e0e3;
+    --accent: #2563eb;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --ok: #16a34a;
+    --warn: #d97706;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121214;
+      --card: #1c1c1f;
+      --text: #f2f2f3;
+      --muted: #9a9a9e;
+      --border: #303034;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 14px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; margin-top: 12px; }
+  label:first-child { margin-top: 0; }
+  input, textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+  }
+  textarea { min-height: 90px; resize: vertical; }
+  button {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 120px; }
+  .row > button { flex: 0 0 auto; }
+  .actions { margin-top: 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .error { color: var(--danger); font-size: 13px; margin-top: 10px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 10px; }
+  [hidden] { display: none !important; }
+
+  .session-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+  .session-card:hover { border-color: var(--accent); }
+  .session-title { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+  .session-meta { font-size: 12px; color: var(--muted); }
+  .badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 100px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  .badge.ready { background: rgba(22,163,74,0.15); color: var(--ok); }
+  .badge.recording { background: rgba(217,119,6,0.15); color: var(--warn); }
+  .badge.uploading { background: rgba(37,99,235,0.15); color: var(--accent); }
+  .badge.failed { background: rgba(220,38,38,0.15); color: var(--danger); }
+
+  .back-link { color: var(--accent); font-size: 13px; cursor: pointer; margin-bottom: 10px; display: inline-block; }
+  .title-input { font-size: 18px; font-weight: 700; border: none; background: transparent; padding: 4px 0; }
+  .title-input:focus { outline: none; border-bottom: 1px solid var(--accent); }
+  .detail-meta { font-size: 12px; color: var(--muted); margin-bottom: 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+  .tab {
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .transcript-block { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 1.5; }
+  .transcript-block:last-child { border-bottom: none; }
+  .transcript-time { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-right: 8px; }
+  .transcript-speaker { font-weight: 600; margin-right: 6px; }
+
+  .action-item { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .action-item:last-child { border-bottom: none; }
+  .action-item input[type=checkbox] { width: auto; margin-top: 3px; }
+  .action-item.checked span { text-decoration: line-through; color: var(--muted); }
+
+  .notes-section { margin-bottom: 16px; }
+  .notes-section:last-child { margin-bottom: 0; }
+  .notes-section h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); margin: 0 0 6px; }
+  .notes-section p, .notes-section ul { margin: 0; font-size: 14px; line-height: 1.5; }
+  .notes-section ul { padding-left: 18px; }
+  .empty-state { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="login-screen">
+    <h1>DeepSink</h1>
+    <div class="subtitle">Sign in to view your meeting sessions.</div>
+    <div class="card">
+      <h2>Sign in</h2>
+      <label for="login-id">User ID</label>
+      <input id="login-id" autocomplete="username">
+      <label for="login-password">Password</label>
+      <input id="login-password" type="password" autocomplete="current-password">
+      <div class="actions">
+        <button onclick="login()">Sign In</button>
+      </div>
+      <div id="login-error" class="error" hidden></div>
+    </div>
+  </div>
+
+  <div id="list-view" hidden>
+    <div class="topbar">
+      <h1>DeepSink</h1>
+      <button class="secondary" onclick="logout()">Sign Out</button>
+    </div>
+
+    <div class="card">
+      <h2>New session</h2>
+      <div class="row">
+        <div>
+          <label>Title</label>
+          <input id="new-session-title" placeholder="Untitled session">
+        </div>
+        <button onclick="createSession()">Create</button>
+      </div>
+      <div class="hint">Recording itself only happens on the phone — this just prepares a session (e.g. to add background notes before a meeting starts).</div>
+    </div>
+
+    <div id="session-list"></div>
+    <div id="list-empty" class="empty-state" hidden>No sessions yet.</div>
+  </div>
+
+  <div id="detail-view" hidden>
+    <span class="back-link" onclick="showList()">&larr; All sessions</span>
+
+    <input id="detail-title" class="title-input" onblur="saveTitle()" onkeydown="if(event.key==='Enter'){this.blur()}">
+    <div class="detail-meta">
+      <span id="detail-badge" class="badge"></span>
+      <span id="detail-when"></span>
+      <span id="detail-duration"></span>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="notes" onclick="showTab('notes')">Notes</div>
+      <div class="tab" data-tab="transcript" onclick="showTab('transcript')">Transcript</div>
+      <div class="tab" data-tab="actions" onclick="showTab('actions')">Actions</div>
+      <div class="tab" data-tab="background" onclick="showTab('background')">Background</div>
+    </div>
+
+    <div id="tab-notes" class="tab-panel">
+      <div class="card">
+        <div id="notes-content"></div>
+        <div class="actions">
+          <button class="secondary" onclick="regenerateNotes()" id="regenerate-btn">Regenerate Notes</button>
+          <span id="notes-status" class="hint"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-transcript" class="tab-panel" hidden>
+      <div class="card">
+        <div id="transcript-content"></div>
+        <div class="actions">
+          <button class="secondary" onclick="diarizeSession()" id="diarize-btn">Detect Speakers</button>
+          <span id="diarize-status" class="hint"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-actions" class="tab-panel" hidden>
+      <div class="card">
+        <div id="actions-content"></div>
+      </div>
+    </div>
+
+    <div id="tab-background" class="tab-panel" hidden>
+      <div class="card">
+        <label for="background-textarea">Free-text context (attendees, agenda, acronyms) — used to interpret the transcript, never treated as meeting content itself.</label>
+        <textarea id="background-textarea"></textarea>
+        <div class="actions">
+          <button onclick="saveBackground()">Save</button>
+          <span id="background-status" class="hint"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="danger" onclick="deleteSession()">Delete Session</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const TOKEN_KEY = "deepsink_token";
+let currentSession = null;
+
+function getToken() { return sessionStorage.getItem(TOKEN_KEY); }
+function setToken(t) { sessionStorage.setItem(TOKEN_KEY, t); }
+function clearToken() { sessionStorage.removeItem(TOKEN_KEY); }
+
+function showLogin(message) {
+  document.getElementById("list-view").hidden = true;
+  document.getElementById("detail-view").hidden = true;
+  document.getElementById("login-screen").hidden = false;
+  const err = document.getElementById("login-error");
+  if (message) { err.textContent = message; err.hidden = false; } else { err.hidden = true; }
+}
+
+function showList() {
+  currentSession = null;
+  document.getElementById("login-screen").hidden = true;
+  document.getElementById("detail-view").hidden = true;
+  document.getElementById("list-view").hidden = false;
+  loadSessions();
+}
+
+function showDetail(id) {
+  document.getElementById("login-screen").hidden = true;
+  document.getElementById("list-view").hidden = true;
+  document.getElementById("detail-view").hidden = false;
+  loadSession(id);
+}
+
+// Relative paths on purpose: this page is served at ".../deepsink/ui" -
+// "sessions" resolves against that same "/deepsink/" directory whether
+// reached via the Mac's LAN address or its Tailscale Funnel URL (which
+// adds its own "/gateway" prefix ahead of that) - the browser's own
+// relative-URL resolution handles the difference, no base-URL logic
+// needed here the way the phone app needs its own.
+async function api(path, options = {}) {
+  const token = getToken();
+  const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch(path, Object.assign({}, options, { headers }));
+  if (res.status === 401) {
+    clearToken();
+    showLogin("Session expired — sign in again.");
+    throw new Error("unauthorized");
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error_description || body.error || ("HTTP " + res.status));
+  return body;
+}
+
+async function login() {
+  const user_id = document.getElementById("login-id").value.trim();
+  const password = document.getElementById("login-password").value;
+  try {
+    const res = await fetch("auth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id, password }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error_description || body.error || "sign-in failed");
+    setToken(body.access_token);
+    showList();
+  } catch (e) {
+    showLogin(e.message);
+  }
+}
+
+function logout() {
+  clearToken();
+  showLogin();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function fmtWhen(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function fmtDuration(seconds) {
+  if (!seconds) return "";
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+async function loadSessions() {
+  const list = document.getElementById("session-list");
+  const empty = document.getElementById("list-empty");
+  try {
+    const data = await api("sessions");
+    const sessions = (data.sessions || []).slice().sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""));
+    list.innerHTML = "";
+    empty.hidden = sessions.length > 0;
+    sessions.forEach(s => {
+      const card = document.createElement("div");
+      card.className = "session-card";
+      card.onclick = () => showDetail(s.id);
+      card.innerHTML = `
+        <div>
+          <div class="session-title">${escapeHtml(s.title || "Untitled session")}</div>
+          <div class="session-meta">${fmtWhen(s.started_at)}${s.duration_seconds ? " · " + fmtDuration(s.duration_seconds) : ""}</div>
+        </div>
+        <span class="badge ${s.stage}">${s.stage}</span>
+      `;
+      list.appendChild(card);
+    });
+  } catch (e) {
+    if (e.message !== "unauthorized") list.innerHTML = `<div class="error">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function createSession() {
+  const titleEl = document.getElementById("new-session-title");
+  const title = titleEl.value.trim();
+  try {
+    const session = await api("sessions", { method: "POST", body: JSON.stringify({ title }) });
+    titleEl.value = "";
+    showDetail(session.id);
+  } catch (e) {
+    if (e.message !== "unauthorized") alert("Error: " + e.message);
+  }
+}
+
+async function loadSession(id) {
+  try {
+    currentSession = await api("sessions/" + encodeURIComponent(id));
+    renderDetail();
+  } catch (e) {
+    if (e.message !== "unauthorized") showList();
+  }
+}
+
+function renderDetail() {
+  const s = currentSession;
+  document.getElementById("detail-title").value = s.title || "";
+  const badge = document.getElementById("detail-badge");
+  badge.textContent = s.stage;
+  badge.className = "badge " + s.stage;
+  document.getElementById("detail-when").textContent = fmtWhen(s.started_at);
+  document.getElementById("detail-duration").textContent = s.duration_seconds ? fmtDuration(s.duration_seconds) : "";
+
+  renderNotes();
+  renderTranscript();
+  renderActions();
+  document.getElementById("background-textarea").value = s.background_notes || "";
+}
+
+function renderNotes() {
+  const el = document.getElementById("notes-content");
+  const notes = currentSession.notes;
+  if (!notes || (!notes.summary && !(notes.key_points || []).length)) {
+    el.innerHTML = `<div class="empty-state">No notes yet — generated automatically once the transcript is ready, or tap Regenerate Notes.</div>`;
+    return;
+  }
+  const section = (title, items, isList) => {
+    if (!items || (isList && items.length === 0) || (!isList && !items)) return "";
+    const body = isList ? `<ul>${items.map(i => `<li>${escapeHtml(i)}</li>`).join("")}</ul>` : `<p>${escapeHtml(items)}</p>`;
+    return `<div class="notes-section"><h3>${title}</h3>${body}</div>`;
+  };
+  el.innerHTML = [
+    section("Summary", notes.summary, false),
+    section("Key Points", notes.key_points, true),
+    section("Decisions", notes.decisions, true),
+    section("Open Questions", notes.open_questions, true),
+  ].join("");
+}
+
+function renderTranscript() {
+  const el = document.getElementById("transcript-content");
+  const blocks = (currentSession.transcript_blocks || []).slice().sort((a, b) => a.start - b.start);
+  if (blocks.length === 0) {
+    el.innerHTML = `<div class="empty-state">No transcript yet.</div>`;
+    return;
+  }
+  const speakerNames = {};
+  (currentSession.speakers || []).forEach(sp => { speakerNames[sp.id] = sp.display_name; });
+  el.innerHTML = blocks.map(b => {
+    const mm = Math.floor(b.start / 60);
+    const ss = Math.floor(b.start % 60).toString().padStart(2, "0");
+    const speaker = b.speaker_id ? `<span class="transcript-speaker">${escapeHtml(speakerNames[b.speaker_id] || b.speaker_id)}:</span>` : "";
+    return `<div class="transcript-block"><span class="transcript-time">${mm}:${ss}</span>${speaker}${escapeHtml(b.text)}</div>`;
+  }).join("");
+}
+
+function renderActions() {
+  const el = document.getElementById("actions-content");
+  const items = (currentSession.action_items || []).slice().sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  if (items.length === 0) {
+    el.innerHTML = `<div class="empty-state">No action items yet.</div>`;
+    return;
+  }
+  el.innerHTML = items.map(item => `
+    <div class="action-item ${item.is_checked ? "checked" : ""}">
+      <input type="checkbox" ${item.is_checked ? "checked" : ""} onchange="toggleActionItem('${item.id}', this.checked)">
+      <span>${escapeHtml(item.text)}${item.owner ? ` <span class="hint">(${escapeHtml(item.owner)})</span>` : ""}</span>
+    </div>
+  `).join("");
+}
+
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
+  document.querySelectorAll(".tab-panel").forEach(p => p.hidden = p.id !== "tab-" + name);
+}
+
+async function saveTitle() {
+  const title = document.getElementById("detail-title").value.trim() || "Untitled session";
+  if (!currentSession || title === currentSession.title) return;
+  try {
+    currentSession = await api("sessions/" + currentSession.id, { method: "PATCH", body: JSON.stringify({ title }) });
+  } catch (e) {
+    if (e.message !== "unauthorized") alert("Error: " + e.message);
+  }
+}
+
+async function saveBackground() {
+  const status = document.getElementById("background-status");
+  const background_notes = document.getElementById("background-textarea").value;
+  try {
+    currentSession = await api("sessions/" + currentSession.id, { method: "PATCH", body: JSON.stringify({ background_notes }) });
+    status.textContent = "Saved.";
+    setTimeout(() => status.textContent = "", 2000);
+  } catch (e) {
+    if (e.message !== "unauthorized") status.textContent = "Error: " + e.message;
+  }
+}
+
+async function toggleActionItem(itemId, isChecked) {
+  try {
+    currentSession = await api(`sessions/${currentSession.id}/action_items/${itemId}`, {
+      method: "PATCH", body: JSON.stringify({ is_checked: isChecked }),
+    });
+    renderActions();
+  } catch (e) {
+    if (e.message !== "unauthorized") { alert("Error: " + e.message); renderActions(); }
+  }
+}
+
+async function regenerateNotes() {
+  const btn = document.getElementById("regenerate-btn");
+  const status = document.getElementById("notes-status");
+  btn.disabled = true;
+  status.textContent = "Regenerating…";
+  try {
+    currentSession = await api(`sessions/${currentSession.id}/notes/regenerate`, { method: "POST" });
+    renderNotes();
+    renderActions();
+    status.textContent = "Done.";
+    setTimeout(() => status.textContent = "", 2000);
+  } catch (e) {
+    if (e.message !== "unauthorized") status.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function diarizeSession() {
+  const btn = document.getElementById("diarize-btn");
+  const status = document.getElementById("diarize-status");
+  btn.disabled = true;
+  status.textContent = "Detecting speakers — this can take a while for a long session…";
+  try {
+    currentSession = await api(`sessions/${currentSession.id}/diarize`, { method: "POST" });
+    renderTranscript();
+    status.textContent = "Done.";
+    setTimeout(() => status.textContent = "", 2000);
+  } catch (e) {
+    if (e.message !== "unauthorized") status.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deleteSession() {
+  if (!currentSession || !confirm(`Delete "${currentSession.title}"? This can't be undone.`)) return;
+  try {
+    await api("sessions/" + currentSession.id, { method: "DELETE" });
+    showList();
+  } catch (e) {
+    if (e.message !== "unauthorized") alert("Error: " + e.message);
+  }
+}
+
+if (getToken()) {
+  showList();
+} else {
+  showLogin();
+}
+</script>
+</body>
+</html>
