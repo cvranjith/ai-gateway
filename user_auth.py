@@ -124,6 +124,15 @@ def _verify_token(token):
         return None
 
 
+def verify_user_token(token):
+    """Public wrapper around _verify_token, for callers outside this
+    module - see gateway.py's combined /invoke auth (accepts this
+    alongside auth.py's own client-credentials token, so DeepSink can
+    call mac_deploy/deepsink_articulate with just its user login,
+    without also needing a separate registered OAuth2 client)."""
+    return _verify_token(token)
+
+
 def require_user(view):
     """Route decorator for /deepsink/sessions/* - like auth.require_auth,
     but also stashes the authenticated user_id on the request

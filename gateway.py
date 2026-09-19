@@ -45,6 +45,7 @@ error handling all stay exactly the same.
 """
 
 import re
+from functools import wraps
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, request, send_file
@@ -57,6 +58,7 @@ from auth import (
     issue_token,
     list_clients,
     require_auth,
+    verify_client_token,
 )
 from services.errors import ServiceError
 from services import youtube_summarizer
@@ -68,7 +70,7 @@ from services import deepsink_articulate
 from services import deepsink_diarize
 from services.youtube_download import FILES_DIR
 from deepsink_sessions import bp as deepsink_sessions_bp
-from user_auth import ensure_bootstrap_user
+from user_auth import ensure_bootstrap_user, verify_user_token
 
 SERVICES = {
     "youtube_summarizer": youtube_summarizer.handle,
@@ -112,8 +114,41 @@ def oauth_token():
     return jsonify(token_response)
 
 
+def require_client_or_user(view):
+    """Route decorator for /invoke: accepts either an ai-gateway OAuth2
+    Client Credentials token (auth.py - other apps, e.g. yt-run's own
+    registered client) or a DeepSink user token (user_auth.py). Added so
+    DeepSink itself no longer needs a separate registered client just to
+    call mac_deploy/deepsink_articulate, on top of the user login it
+    already needs for its session data - one password, one JWT, for
+    everything DeepSink calls here. Sets request.deepsink_user_id to the
+    user_id for a user token, None for a client-credentials token, in
+    case a handler ever wants to know which kind of caller this was."""
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return jsonify({"error": "invalid_token", "error_description": "missing bearer token"}), 401
+
+        token = header[len("Bearer "):].strip()
+
+        if verify_client_token(token) is not None:
+            request.deepsink_user_id = None
+            return view(*args, **kwargs)
+
+        user_payload = verify_user_token(token)
+        if user_payload is not None:
+            request.deepsink_user_id = user_payload["sub"]
+            return view(*args, **kwargs)
+
+        return jsonify({"error": "invalid_token", "error_description": "token is invalid or expired"}), 401
+
+    return wrapped
+
+
 @app.route("/invoke", methods=["POST"])
-@require_auth
+@require_client_or_user
 def invoke():
     body = request.get_json(silent=True) or {}
     service_id = body.get("service_id")

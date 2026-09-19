@@ -137,6 +137,14 @@ def _verify_token(token):
         return None
 
 
+def verify_client_token(token):
+    """Public wrapper around _verify_token, for callers outside this
+    module that need to check a client-credentials token without the
+    full require_auth decorator - see gateway.py's combined /invoke
+    auth, which also accepts a DeepSink user token (user_auth.py)."""
+    return _verify_token(token)
+
+
 def require_auth(view):
     """Route decorator — rejects the request with a standard OAuth2-shaped
     401 unless a valid, unexpired Bearer token is present."""

@@ -137,15 +137,26 @@ gitignored — real meeting content never belongs in git) and
 `deepsink_diarize`'s `handle()` functions as plain in-process calls for
 the actual Whisper/Codex work, so each only runs from one place.
 
-### Auth: a separate user login, not `/invoke`'s client credentials
+### Auth: a separate user login, also accepted by `/invoke`
 
 `/deepsink/*` has its own auth boundary (`user_auth.py`), deliberately
 parallel to — but independent of — `auth.py`'s OAuth2 client
-credentials that gate `/invoke`. A `client_id`/`client_secret` answers
-"is this a legitimate app talking to the gateway at all"; a DeepSink
+credentials. A `client_id`/`client_secret` answers "is this a
+legitimate app talking to the gateway at all"; a DeepSink
 `user_id`/`password` answers "whose session data is this," and scopes
 every `session_store.py` call to that user's own folder
-(`sessions_data/<user_id>/...`). Single user today (see
+(`sessions_data/<user_id>/...`).
+
+`/invoke` itself accepts *either* token (`gateway.py`'s
+`require_client_or_user`) — a plain client-credentials token (other
+apps, e.g. yt-run's own registered client) or a DeepSink user token.
+This means DeepSink doesn't need its own separate registered client at
+all: one login (user_id/password) is enough for everything it calls,
+both `/invoke` (`mac_deploy`, `deepsink_articulate`) and
+`/deepsink/sessions/*`. `/api/config`/`/api/clients` stay
+client-credentials-only (admin-level, `/ui`'s own auth).
+
+Single user today (see
 `ensure_bootstrap_user()` — a `ranjith` user with a random password is
 created automatically on first startup if none exists yet, printed once
 to the gateway's own log, same pattern as `auth.py`'s bootstrap client),
@@ -162,11 +173,10 @@ POST /deepsink/auth/token
 
 That JWT (a week-long expiry — a human signing into their own phone,
 not a machine client re-authing hourly) is what every `/deepsink/sessions/*`
-call below sends as `Authorization: Bearer <token>`. Reached through
-ai-router's `/deepsink/*` passthrough in normal use — that prefix
-forwards the caller's own Authorization header straight through
-unchanged (see that project's own README), rather than exchanging it
-for anything, since the auth is meant to be held by the app itself.
+call below sends as `Authorization: Bearer <token>`, and what `/invoke`
+also accepts now (see above). DeepSink talks to this gateway directly —
+no Cloudflare/ai-router hop for it anymore (see that project's own
+README; yt-run still uses it for its own, separate purposes).
 
 ```
 POST   /deepsink/sessions                          { "title": "..." }              -> 201 <session>
@@ -275,11 +285,14 @@ and `--log`/`--follow` for its logs).
 
 ## Auth
 
-`/invoke`, `/api/config`, and `/api/clients` all require OAuth2 Client
-Credentials — see `auth.py` for the full flow. This endpoint is
+`/api/config` and `/api/clients` require OAuth2 Client Credentials —
+see `auth.py` for the full flow. `/invoke` accepts that too, but also
+accepts a DeepSink user token (`user_auth.py` — see "Auth: a separate
+user login" above); it's the only route both cover. This endpoint is
 reachable over the public internet once `local-llm.sh` has run (via
 Tailscale Funnel), not just the private tailnet, so every client needs
-its own registered `client_id`/`client_secret`.
+its own registered `client_id`/`client_secret` (except DeepSink, which
+just uses its user login instead).
 
 **First run**: if no clients are registered at all yet (a brand new
 `auth_config.json`, or none exists), the gateway auto-creates one
