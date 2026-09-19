@@ -98,6 +98,16 @@ def _read_hf_token():
     return token or None
 
 
+def is_configured():
+    """Cheap check for callers (deepsink_sessions.py's auto-diarize-on-
+    finish) that want to skip quietly rather than kick off a call that's
+    just going to raise the same 503 handle() already raises for this -
+    that 503 is meant for a user pressing "Detect Speakers" and seeing
+    why, not for silently populating every session's diarization_error
+    with "not configured" the moment ai-gateway starts fresh."""
+    return bool(_read_hf_token()) and VENV_PYTHON.exists()
+
+
 def _parse_chunks(chunks):
     if not isinstance(chunks, list) or not chunks:
         raise ServiceError("missing or empty 'chunks'", 400)

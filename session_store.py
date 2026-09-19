@@ -111,6 +111,7 @@ def create_session(user_id, title, started_at=None):
         "speakers": [],
         "is_diarizing": False,
         "diarization_error": None,
+        "is_generating_notes": False,
     }
     with _lock_for(user_id, session_id):
         _write(user_id, session_id, data)
@@ -202,12 +203,13 @@ def save_notes(user_id, session_id, notes_payload, action_items):
         data["ready_at"] = _now()
         data["stage"] = "ready"
         data["failure_reason"] = None
+        data["is_generating_notes"] = False
         _write(user_id, session_id, data)
         return data
 
 
 def mark_failed(user_id, session_id, reason):
-    return update_session(user_id, session_id, stage="failed", failure_reason=reason)
+    return update_session(user_id, session_id, stage="failed", failure_reason=reason, is_generating_notes=False)
 
 
 def toggle_action_item(user_id, session_id, item_id, is_checked):

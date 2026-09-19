@@ -233,6 +233,13 @@ def _generate_notes(user_id, session_id):
     if data is None:
         return None, (jsonify({"error": "not_found"}), 404)
 
+    # Set immediately, before the (possibly slow) Codex call - this is
+    # what lets a viewer show a "generating notes" spinner instead of a
+    # plain empty tab while it's in flight. Cleared by whichever exit
+    # path is actually taken below (mark_failed or save_notes both set
+    # it back to False as part of their own single write).
+    session_store.update_session(user_id, session_id, is_generating_notes=True)
+
     transcript = " ".join(
         block["text"] for block in sorted(data["transcript_blocks"], key=lambda b: b["start"])
     )
@@ -275,9 +282,16 @@ def _generate_notes(user_id, session_id):
 @bp.route("/sessions/<session_id>/finish", methods=["POST"])
 @user_auth.require_user
 def finish_session(session_id):
-    data, error_response = _generate_notes(_current_user_id(), session_id)
+    user_id = _current_user_id()
+    data, error_response = _generate_notes(user_id, session_id)
     if error_response is not None:
         return error_response
+    # Auto-fires once a recording is genuinely finished, not per-chunk
+    # like notes above - diarizing is real CPU-minutes, only worth
+    # paying once there's a final, complete transcript. Manual "Detect
+    # Speakers" (the /diarize route below) still exists for a re-run
+    # after an edit, or for a session finished before this existed.
+    _trigger_background_diarize(user_id, session_id)
     return jsonify(data)
 
 
@@ -378,16 +392,26 @@ def stream_live_preview(session_id):
 @bp.route("/sessions/<session_id>/diarize", methods=["POST"])
 @user_auth.require_user
 def diarize_session(session_id):
-    user_id = _current_user_id()
-    data = _session_or_404(session_id)
+    updated, error_response = _run_diarization(_current_user_id(), session_id)
+    if error_response is not None:
+        return error_response
+    return jsonify(updated)
+
+
+def _run_diarization(user_id, session_id):
+    """Returns (updated_session, error_response) - error_response is a
+    (jsonify(...), status) tuple on failure, None on success. Shared by
+    the manual /diarize route above and the automatic post-/finish
+    trigger below, so there's exactly one place this actually runs."""
+    data = session_store.get_session(user_id, session_id)
     if data is None:
-        return jsonify({"error": "not_found"}), 404
+        return None, (jsonify({"error": "not_found"}), 404)
 
     chunk_parts = []
     for chunk in data["chunks"]:
         path = session_store.chunk_audio_path(user_id, session_id, chunk["file_name"])
         if not path.exists():
-            return jsonify({"error": "audio for this session is no longer available"}), 409
+            return None, (jsonify({"error": "audio for this session is no longer available"}), 409)
         chunk_parts.append({
             "audio_base64": base64.b64encode(path.read_bytes()).decode(),
             "start_offset_seconds": chunk["start_offset_seconds"],
@@ -398,7 +422,7 @@ def diarize_session(session_id):
         result = deepsink_diarize.handle({"chunks": chunk_parts, "format": "m4a"})
     except ServiceError as e:
         session_store.update_session(user_id, session_id, is_diarizing=False, diarization_error=e.message)
-        return jsonify({"error": e.message}), e.status_code
+        return None, (jsonify({"error": e.message}), e.status_code)
 
     embeddings = result.get("embeddings", {})
     session_store.save_speaker_embeddings(user_id, session_id, embeddings)
@@ -407,7 +431,21 @@ def diarize_session(session_id):
         data["transcript_blocks"], result.get("segments", []), data.get("speakers") or [], user_id, embeddings
     )
     updated = session_store.set_speakers(user_id, session_id, updated_blocks, speakers)
-    return jsonify(updated)
+    return updated, None
+
+
+def _trigger_background_diarize(user_id, session_id):
+    # Quiet no-ops (not an error anywhere a user would see it) if
+    # diarization isn't set up, there's no audio, or one's somehow
+    # already running - the manual "Detect Speakers" button still gives
+    # a real error if genuinely tapped without setup; this is just the
+    # automatic convenience path and shouldn't be noisy about declining.
+    if not deepsink_diarize.is_configured():
+        return
+    data = session_store.get_session(user_id, session_id)
+    if not data or not data.get("chunks") or data.get("is_diarizing"):
+        return
+    threading.Thread(target=lambda: _run_diarization(user_id, session_id), daemon=True).start()
 
 
 @bp.route("/sessions/<session_id>/speakers/<speaker_id>", methods=["PATCH"])
