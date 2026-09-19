@@ -512,7 +512,13 @@ function stopPolling() {
 function updateLiveStream() {
   const shouldStream = currentTab === "transcript" && currentSession && isLiveStage(currentSession.stage);
   if (shouldStream && !liveEventSource) {
-    liveEventSource = new EventSource("sessions/" + currentSession.id + "/live_preview/stream");
+    // Token as a query param, not the usual Authorization header this
+    // page uses everywhere else (api()) - confirmed the hard way (a
+    // 401 on every real connection attempt): EventSource cannot set
+    // custom request headers at all, full stop, so this route alone
+    // accepts it this way (see deepsink_sessions.py's stream_live_preview).
+    const url = "sessions/" + currentSession.id + "/live_preview/stream?token=" + encodeURIComponent(getToken());
+    liveEventSource = new EventSource(url);
     liveEventSource.onmessage = (evt) => {
       try {
         renderLiveLine((JSON.parse(evt.data).text || ""));

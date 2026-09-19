@@ -356,11 +356,29 @@ def get_live_preview_viewers(session_id):
 
 
 @bp.route("/sessions/<session_id>/live_preview/stream", methods=["GET"])
-@user_auth.require_user
 def stream_live_preview(session_id):
-    if _session_or_404(session_id) is None:
+    # Deliberately NOT @user_auth.require_user - confirmed the hard way
+    # (a 401 on every single real browser attempt, silently making the
+    # whole live-preview feature look broken end to end): EventSource,
+    # the browser API the web viewer uses for this, cannot set custom
+    # request headers at all - no Authorization header support, a
+    # standing limitation of that API, not something a client-side fix
+    # can work around. This route alone also accepts the token as a
+    # query param for exactly that reason; every other route stays
+    # header-only.
+    token = request.args.get("token") or ""
+    if not token:
+        header = request.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            token = header[len("Bearer "):].strip()
+    payload = user_auth.verify_user_token(token)
+    if payload is None:
+        return jsonify({"error": "invalid_token"}), 401
+    user_id = payload["sub"]
+
+    if session_store.get_session(user_id, session_id) is None:
         return jsonify({"error": "not_found"}), 404
-    key = f"{_current_user_id()}:{session_id}"
+    key = f"{user_id}:{session_id}"
 
     def generate():
         live_preview.add_viewer(key)
