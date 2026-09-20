@@ -39,6 +39,7 @@ import re
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
 from flask import Blueprint, Response, jsonify, request
 
@@ -46,8 +47,12 @@ import live_preview
 import session_store
 import speaker_roster
 import user_auth
-from services import deepsink_diarize, deepsink_notes, deepsink_transcribe
+from services import deepsink_diarize, deepsink_notes, deepsink_prepare, deepsink_transcribe
 from services.errors import ServiceError
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
 bp = Blueprint("deepsink", __name__, url_prefix="/deepsink")
 
@@ -346,6 +351,47 @@ def add_marker(session_id):
     if data is None:
         return jsonify({"error": "not_found"}), 404
     return jsonify(data)
+
+
+# "Prepare Me" - a persisted, multi-turn planning conversation for a
+# meeting/presentation that hasn't happened yet (see deepsink_prepare.py's
+# own docstring for the full framing). One route, not a create+append
+# pair: an empty "message" with an empty prep_chat kicks the
+# conversation off (the model opens with a clarifying question); any
+# other call is a normal turn. `history` sent to the model is always
+# the session's existing prep_chat, so this route is the only writer -
+# no client-side merge logic, same "server returns the full session"
+# contract as everything else here.
+@bp.route("/sessions/<session_id>/prepare/chat", methods=["POST"])
+@user_auth.require_user
+def prepare_chat(session_id):
+    user_id = _current_user_id()
+    data = _session_or_404(session_id)
+    if data is None:
+        return jsonify({"error": "not_found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    message = (body.get("message") or "").strip()
+    history = data.get("prep_chat") or []
+    if not message and history:
+        return jsonify({"error": "missing 'message'"}), 400
+
+    try:
+        result = deepsink_prepare.handle({
+            "background_notes": data.get("background_notes") or "",
+            "history": history,
+            "message": message,
+        })
+    except ServiceError as e:
+        return jsonify({"error": e.message}), e.status_code
+
+    new_turns = list(history)
+    if message:
+        new_turns.append({"role": "user", "content": message, "created_at": _now_iso()})
+    new_turns.append({"role": "assistant", "content": result.get("reply", ""), "created_at": _now_iso()})
+
+    updated = session_store.update_session(user_id, session_id, prep_chat=new_turns)
+    return jsonify(updated)
 
 
 # --- Live preview (live_preview.py) - see that module's own docstring.

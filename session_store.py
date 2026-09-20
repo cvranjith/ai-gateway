@@ -132,6 +132,15 @@ def create_session(user_id, title, started_at=None, is_recording=False):
         # viewer's live-stream subscription both key off this now, not
         # stage.
         "is_recording": is_recording,
+        # The "Prepare Me" conversation (deepsink_prepare / the web
+        # viewer's Prepare tab) - a persisted, multi-turn thread, unlike
+        # the Chat tab's one-shot Q&A (which never gets saved at all).
+        # [{"role": "user"|"assistant", "content": "...", "created_at": "..."}, ...],
+        # oldest first. Runs *before* a recording exists, but isn't
+        # cleared if one starts - background_notes is still what feeds
+        # actual notes generation; this is scratch space for getting
+        # there.
+        "prep_chat": [],
     }
     with _lock_for(user_id, session_id):
         _write(user_id, session_id, data)
