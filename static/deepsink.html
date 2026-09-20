@@ -160,6 +160,15 @@
   .chat-q { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
   .chat-a { font-size: 14px; line-height: 1.5; }
   .chat-a ul { margin: 4px 0 0; padding-left: 18px; }
+
+  .prep-message { margin-bottom: 14px; max-width: 85%; }
+  .prep-message:last-child { margin-bottom: 0; }
+  .prep-message.assistant { margin-right: auto; }
+  .prep-message.user { margin-left: auto; text-align: right; }
+  .prep-role { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); margin-bottom: 3px; }
+  .prep-text { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+  .prep-message.user .prep-text { background: var(--accent); color: var(--accent-text); padding: 8px 12px; border-radius: 12px; display: inline-block; text-align: left; }
+  .prep-message.assistant .prep-text { background: var(--bg); padding: 8px 12px; border-radius: 12px; display: inline-block; }
 </style>
 </head>
 <body>
@@ -218,6 +227,7 @@
       <div class="tab" data-tab="transcript" onclick="showTab('transcript')">Transcript</div>
       <div class="tab" data-tab="actions" onclick="showTab('actions')">Actions</div>
       <div class="tab" data-tab="background" onclick="showTab('background')">Background</div>
+      <div class="tab" data-tab="prepare" onclick="showTab('prepare')">Prepare</div>
       <div class="tab" data-tab="chat" onclick="showTab('chat')">Chat</div>
     </div>
 
@@ -256,6 +266,21 @@
           <button onclick="saveBackground()">Save</button>
           <span id="background-status" class="hint"></span>
         </div>
+      </div>
+    </div>
+
+    <div id="tab-prepare" class="tab-panel" hidden>
+      <div class="card">
+        <div id="prepare-log"></div>
+        <div class="row" style="margin-top:10px">
+          <div>
+            <label for="prepare-message">Your reply</label>
+            <input id="prepare-message" placeholder="Type your answer…" onkeydown="if(event.key==='Enter'){sendPrepMessage()}">
+          </div>
+          <button onclick="sendPrepMessage()" id="prepare-send-btn">Send</button>
+        </div>
+        <div id="prepare-status" class="hint" style="margin-top:8px"></div>
+        <div class="hint" style="margin-top:10px">A planning conversation for something you haven't presented or recorded yet — what you land on here feeds into Background once you're ready to record.</div>
       </div>
     </div>
 
@@ -454,6 +479,7 @@ function renderDetail() {
   renderNotes();
   renderTranscript();
   renderActions();
+  renderPrepare();
   document.getElementById("background-textarea").value = s.background_notes || "";
 
   // Both of these look at the session's current stage, which can change
@@ -703,6 +729,51 @@ function renderActions() {
       <span>${escapeHtml(item.text)}${item.owner ? ` <span class="hint">(${escapeHtml(item.owner)})</span>` : ""}</span>
     </div>
   `).join("");
+}
+
+function renderPrepare() {
+  const el = document.getElementById("prepare-log");
+  const history = currentSession.prep_chat || [];
+  if (history.length === 0) {
+    el.innerHTML = `<div class="empty-state">Plan something you haven't presented yet.</div>
+      <div class="actions" style="justify-content:center"><button onclick="sendPrepMessageInternal('')" id="prepare-start-btn">Start Planning</button></div>`;
+    document.getElementById("prepare-message").value = "";
+    return;
+  }
+  el.innerHTML = history.map(turn => `
+    <div class="prep-message ${turn.role === "user" ? "user" : "assistant"}">
+      <div class="prep-role">${turn.role === "user" ? "You" : "Assistant"}</div>
+      <div class="prep-text">${escapeHtml(turn.content)}</div>
+    </div>
+  `).join("");
+  el.scrollIntoView({ block: "end", behavior: "smooth" });
+}
+
+async function sendPrepMessage() {
+  const input = document.getElementById("prepare-message");
+  const message = input.value.trim();
+  const hasHistory = (currentSession.prep_chat || []).length > 0;
+  if (!message && hasHistory) return;
+  input.value = "";
+  await sendPrepMessageInternal(message);
+}
+
+async function sendPrepMessageInternal(message) {
+  const status = document.getElementById("prepare-status");
+  const btn = document.getElementById("prepare-send-btn");
+  btn.disabled = true;
+  status.textContent = "Thinking…";
+  try {
+    currentSession = await api(`sessions/${currentSession.id}/prepare/chat`, {
+      method: "POST", body: JSON.stringify({ message }),
+    });
+    renderPrepare();
+    status.textContent = "";
+  } catch (e) {
+    if (e.message !== "unauthorized") status.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function showTab(name) {
