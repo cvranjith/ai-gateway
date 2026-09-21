@@ -62,6 +62,7 @@ from auth import (
 )
 from services.errors import ServiceError
 from services import youtube_summarizer
+from services import youtube_classify
 from services import youtube_download
 from services import mac_deploy
 from services import deepsink_transcribe
@@ -77,6 +78,7 @@ from user_auth import ensure_bootstrap_user, verify_user_token
 
 SERVICES = {
     "youtube_summarizer": youtube_summarizer.handle,
+    "youtube_classify": youtube_classify.handle,
     "youtube_download": youtube_download.handle,
     "mac_deploy": mac_deploy.handle,
     "deepsink_transcribe": deepsink_transcribe.handle,
