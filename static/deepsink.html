@@ -220,7 +220,7 @@
   <div id="detail-view" hidden>
     <span class="back-link" onclick="showList()">&larr; All sessions</span>
 
-    <input id="detail-title" class="title-input" onblur="saveTitle()" onkeydown="if(event.key==='Enter'){this.blur()}">
+    <input id="detail-title" class="title-input" oninput="titleDirty = true" onblur="saveTitle()" onkeydown="if(event.key==='Enter'){this.blur()}">
     <div class="detail-meta">
       <span id="detail-badge" class="badge"></span>
       <span id="detail-when"></span>
@@ -265,7 +265,7 @@
     <div id="tab-background" class="tab-panel" hidden>
       <div class="card">
         <label for="background-textarea">Free-text context (attendees, agenda, acronyms) — used to interpret the transcript, never treated as meeting content itself.</label>
-        <textarea id="background-textarea"></textarea>
+        <textarea id="background-textarea" oninput="backgroundDirty = true"></textarea>
         <div class="actions">
           <button onclick="saveBackground()">Save</button>
           <span id="background-status" class="hint"></span>
@@ -342,6 +342,15 @@ let liveEventSource = null;
 let pollTimer = null;
 let chatBusy = false;
 let hasSetInitialTab = false;
+// Set on input, cleared once that field's own save actually lands -
+// renderDetail() (called on every poll tick, not just an explicit
+// fetch) skips re-populating a field while its flag is true. Without
+// this, background_notes/title were getting silently overwritten by
+// the next background refresh mid-keystroke, since neither saves on
+// every character - only on Save/blur - so there was always a window
+// where the textarea held text the server didn't have yet.
+let backgroundDirty = false;
+let titleDirty = false;
 
 function getToken() { return sessionStorage.getItem(TOKEN_KEY); }
 function setToken(t) { sessionStorage.setItem(TOKEN_KEY, t); }
@@ -372,6 +381,8 @@ function showDetail(id) {
   document.getElementById("chat-log").innerHTML = "";
   showTab("notes");
   hasSetInitialTab = false;
+  backgroundDirty = false;
+  titleDirty = false;
   loadSession(id);
 }
 
@@ -494,7 +505,7 @@ async function loadSession(id) {
 
 function renderDetail() {
   const s = currentSession;
-  document.getElementById("detail-title").value = s.title || "";
+  if (!titleDirty) document.getElementById("detail-title").value = s.title || "";
   const badge = document.getElementById("detail-badge");
   badge.textContent = s.stage;
   badge.className = "badge " + s.stage;
@@ -507,7 +518,7 @@ function renderDetail() {
   renderPrepare();
   renderMaterialsList();
   renderBackgroundSummary();
-  document.getElementById("background-textarea").value = s.background_notes || "";
+  if (!backgroundDirty) document.getElementById("background-textarea").value = s.background_notes || "";
 
   // Both of these look at the session's current stage, which can change
   // between one render and the next (a poll tick, a chunk landing) - so
@@ -811,6 +822,10 @@ function showTab(name) {
 }
 
 async function saveTitle() {
+  // Cleared on blur regardless of outcome below - once the user's
+  // actually done editing (blurred), there's no more local state worth
+  // protecting from the next poll either way.
+  titleDirty = false;
   const title = document.getElementById("detail-title").value.trim() || "Untitled session";
   if (!currentSession || title === currentSession.title) return;
   try {
@@ -825,6 +840,10 @@ async function saveBackground() {
   const background_notes = document.getElementById("background-textarea").value;
   try {
     currentSession = await api("sessions/" + currentSession.id, { method: "PATCH", body: JSON.stringify({ background_notes }) });
+    // Only cleared on success - a failed save should keep protecting
+    // the unsaved text from being overwritten by the next poll, not
+    // just silently let it get clobbered a few seconds later.
+    backgroundDirty = false;
     status.textContent = "Saved.";
     setTimeout(() => status.textContent = "", 2000);
   } catch (e) {
