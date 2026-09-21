@@ -37,6 +37,11 @@
     padding: 24px;
   }
   .wrap { max-width: 720px; margin: 0 auto; }
+  /* Widened only while a session is open (toggled in JS - showDetail/
+     showList), for the split layout (Engage alongside Notes/Transcript/
+     etc.) - the list/login screens stay at the narrower width above,
+     which suits a single column of cards fine. */
+  .wrap.wide { max-width: 1200px; }
   h1 { font-size: 20px; margin: 0 0 4px; }
   .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
   .card {
@@ -174,10 +179,82 @@
   .material-row:last-child { border-bottom: none; }
   .summary-fields { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; font-size: 13px; }
   .summary-fields strong { color: var(--muted); font-weight: 600; }
+
+  .detail-header { display: flex; align-items: center; gap: 10px; }
+  .detail-header .title-input { flex: 1; min-width: 0; }
+  .icon-btn {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    font-size: 15px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .icon-btn.danger { color: var(--danger); border-color: var(--danger); }
+
+  /* Split layout: Notes/Transcript/Actions/Background on the left,
+     Engage (chat) as a sticky companion panel on the right, so you can
+     keep an eye on the transcript/notes while chatting instead of
+     switching away from them - width adjustable by dragging
+     split-divider, remembered in localStorage (a per-viewer
+     convenience, not session data). Falls back to a plain stacked
+     column under 900px - a side-by-side split doesn't fit a narrow
+     window/phone screen sensibly, and this whole page is explicitly
+     desktop-first (see ai-gateway's README on why Prepare/materials
+     are web-only in the first place). */
+  .split-container { display: flex; }
+  .split-left { flex: 1 1 auto; min-width: 0; }
+  .split-divider {
+    flex: 0 0 14px;
+    cursor: col-resize;
+    position: relative;
+  }
+  .split-divider::after {
+    content: "";
+    position: absolute;
+    left: 6px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+  .split-divider:hover::after, .split-divider.dragging::after { background: var(--accent); }
+  .split-right {
+    flex: 0 0 380px;
+    min-width: 260px;
+    max-width: 60vw;
+    align-self: flex-start;
+    position: sticky;
+    top: 16px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  @media (max-width: 900px) {
+    .split-container { flex-direction: column; }
+    .split-divider { display: none; }
+    .split-right {
+      position: static;
+      max-height: none;
+      max-width: none;
+      flex-basis: auto;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" id="wrap">
 
   <div id="login-screen">
     <h1>DeepSink</h1>
@@ -220,19 +297,24 @@
   <div id="detail-view" hidden>
     <span class="back-link" onclick="showList()">&larr; All sessions</span>
 
-    <input id="detail-title" class="title-input" oninput="titleDirty = true" onblur="saveTitle()" onkeydown="if(event.key==='Enter'){this.blur()}">
+    <div class="detail-header">
+      <input id="detail-title" class="title-input" oninput="titleDirty = true" onblur="saveTitle()" onkeydown="if(event.key==='Enter'){this.blur()}">
+      <button class="icon-btn danger" onclick="deleteSession()" title="Delete Session">🗑</button>
+    </div>
     <div class="detail-meta">
       <span id="detail-badge" class="badge"></span>
       <span id="detail-when"></span>
       <span id="detail-duration"></span>
     </div>
 
+    <div class="split-container" id="split-container">
+    <div class="split-left" id="split-left">
+
     <div class="tabs">
       <div class="tab active" data-tab="notes" onclick="showTab('notes')">Notes</div>
       <div class="tab" data-tab="transcript" onclick="showTab('transcript')">Transcript</div>
       <div class="tab" data-tab="actions" onclick="showTab('actions')">Actions</div>
       <div class="tab" data-tab="background" onclick="showTab('background')">Background</div>
-      <div class="tab" data-tab="chat" onclick="showTab('chat')">Chat</div>
     </div>
 
     <div id="tab-notes" class="tab-panel">
@@ -309,26 +391,27 @@
       </div>
     </div>
 
-    <div id="tab-chat" class="tab-panel" hidden>
-      <div class="card">
-        <div id="chat-log"></div>
-        <div class="row" style="margin-top:10px">
-          <div>
-            <label for="chat-question">Ask a question about this session</label>
-            <input id="chat-question" placeholder="What did we decide about X?" onkeydown="if(event.key==='Enter'){askChat()}">
-          </div>
-          <button onclick="askChat()" id="chat-ask-btn">Ask</button>
-        </div>
-        <div class="actions">
-          <button class="secondary" onclick="quickArticulate()" id="articulate-btn">Articulate</button>
-          <span id="chat-status" class="hint"></span>
-        </div>
-        <div class="hint" style="margin-top:10px">Grounded only in this session's own transcript and background notes — not a general-purpose assistant.</div>
-      </div>
     </div>
 
-    <div class="actions">
-      <button class="danger" onclick="deleteSession()">Delete Session</button>
+    <div class="split-divider" id="split-divider"></div>
+
+    <div class="split-right" id="split-right">
+      <h2 style="margin:0 0 12px">Engage</h2>
+      <div id="chat-log" style="flex:1; overflow-y:auto"></div>
+      <div class="row" style="margin-top:10px">
+        <div>
+          <label for="chat-question">Ask a question about this session</label>
+          <input id="chat-question" placeholder="What did we decide about X?" onkeydown="if(event.key==='Enter'){askChat()}">
+        </div>
+        <button onclick="askChat()" id="chat-ask-btn">Ask</button>
+      </div>
+      <div class="actions">
+        <button class="secondary" onclick="quickArticulate()" id="articulate-btn">Articulate</button>
+        <span id="chat-status" class="hint"></span>
+      </div>
+      <div class="hint" style="margin-top:10px">Grounded only in this session's own transcript and background notes — not a general-purpose assistant.</div>
+    </div>
+
     </div>
   </div>
 
@@ -360,6 +443,7 @@ function showLogin(message) {
   document.getElementById("list-view").hidden = true;
   document.getElementById("detail-view").hidden = true;
   document.getElementById("login-screen").hidden = false;
+  document.getElementById("wrap").classList.remove("wide");
   const err = document.getElementById("login-error");
   if (message) { err.textContent = message; err.hidden = false; } else { err.hidden = true; }
 }
@@ -371,6 +455,7 @@ function showList() {
   document.getElementById("login-screen").hidden = true;
   document.getElementById("detail-view").hidden = true;
   document.getElementById("list-view").hidden = false;
+  document.getElementById("wrap").classList.remove("wide");
   loadSessions();
 }
 
@@ -378,11 +463,13 @@ function showDetail(id) {
   document.getElementById("login-screen").hidden = true;
   document.getElementById("list-view").hidden = true;
   document.getElementById("detail-view").hidden = false;
+  document.getElementById("wrap").classList.add("wide");
   document.getElementById("chat-log").innerHTML = "";
   showTab("notes");
   hasSetInitialTab = false;
   backgroundDirty = false;
   titleDirty = false;
+  initSplitDivider();
   loadSession(id);
 }
 
@@ -1116,6 +1203,61 @@ async function quickArticulate() {
     chatBusy = false;
     btn.disabled = false;
   }
+}
+
+// Drag-to-resize for the Engage panel (split-right) - adjusts its
+// width, not split-left's, since the chat panel is the one with a
+// meaningful "how wide do I want this" preference; the left side just
+// takes whatever's left. Bound once (guarded by dataset.bound) since
+// showDetail() calls this every time a session opens, but the
+// underlying DOM elements are static, never recreated.
+function initSplitDivider() {
+  const divider = document.getElementById("split-divider");
+  const right = document.getElementById("split-right");
+  const container = document.getElementById("split-container");
+  if (!divider || divider.dataset.bound) return;
+  divider.dataset.bound = "1";
+
+  const STORAGE_KEY = "deepsink_split_right_width";
+  let dragging = false;
+
+  function applyWidth(px) {
+    right.style.flex = `0 0 ${px}px`;
+  }
+
+  function onMove(clientX) {
+    const rect = container.getBoundingClientRect();
+    const rightWidth = rect.right - clientX - 14; // 14 = divider's own flex-basis
+    const minRight = 260;
+    const minLeft = 280;
+    const maxRight = rect.width - minLeft - 14;
+    const clamped = Math.max(minRight, Math.min(maxRight, rightWidth));
+    applyWidth(clamped);
+    try { localStorage.setItem(STORAGE_KEY, String(clamped)); } catch (e) { /* private window, etc */ }
+  }
+
+  function startDrag(clientX) {
+    dragging = true;
+    divider.classList.add("dragging");
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    divider.classList.remove("dragging");
+  }
+
+  divider.addEventListener("mousedown", (e) => { startDrag(e.clientX); e.preventDefault(); });
+  window.addEventListener("mousemove", (e) => { if (dragging) onMove(e.clientX); });
+  window.addEventListener("mouseup", endDrag);
+
+  divider.addEventListener("touchstart", (e) => { if (e.touches[0]) startDrag(e.touches[0].clientX); }, { passive: true });
+  window.addEventListener("touchmove", (e) => { if (dragging && e.touches[0]) onMove(e.touches[0].clientX); }, { passive: true });
+  window.addEventListener("touchend", endDrag);
+
+  try {
+    const saved = parseFloat(localStorage.getItem(STORAGE_KEY));
+    if (!isNaN(saved)) applyWidth(saved);
+  } catch (e) { /* private window, etc */ }
 }
 
 if (getToken()) {
