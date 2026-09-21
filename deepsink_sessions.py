@@ -44,10 +44,17 @@ from datetime import datetime, timezone
 from flask import Blueprint, Response, jsonify, request
 
 import live_preview
+import material_extract
 import session_store
 import speaker_roster
 import user_auth
-from services import deepsink_diarize, deepsink_notes, deepsink_prepare, deepsink_transcribe
+from services import (
+    deepsink_background_extract,
+    deepsink_diarize,
+    deepsink_notes,
+    deepsink_prepare,
+    deepsink_transcribe,
+)
 from services.errors import ServiceError
 
 
@@ -391,6 +398,91 @@ def prepare_chat(session_id):
     new_turns.append({"role": "assistant", "content": result.get("reply", ""), "created_at": _now_iso()})
 
     updated = session_store.update_session(user_id, session_id, prep_chat=new_turns)
+    return jsonify(updated)
+
+
+# Background prep materials (PDF/plain-text uploads) - see
+# material_extract.py and session_store.py's own comments. The raw
+# file is never kept, only its extracted text; MAX_MATERIAL_BYTES is a
+# sanity cap on the *decoded* upload (a personal app's own prep
+# documents, not a general file host).
+MAX_MATERIAL_BYTES = 20 * 1024 * 1024
+
+
+@bp.route("/sessions/<session_id>/materials", methods=["POST"])
+@user_auth.require_user
+def upload_material(session_id):
+    user_id = _current_user_id()
+    if _session_or_404(session_id) is None:
+        return jsonify({"error": "not_found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    filename = (body.get("filename") or "").strip() or "Untitled"
+    fmt = (body.get("format") or "").strip().lower()
+    content_b64 = (body.get("content_base64") or "").strip()
+    if not content_b64:
+        return jsonify({"error": "missing 'content_base64'"}), 400
+    try:
+        file_bytes = base64.b64decode(content_b64, validate=True)
+    except Exception:
+        return jsonify({"error": "'content_base64' is not valid base64"}), 400
+    if len(file_bytes) > MAX_MATERIAL_BYTES:
+        return jsonify({"error": f"file too large - {MAX_MATERIAL_BYTES // (1024 * 1024)}MB max"}), 413
+
+    try:
+        text = material_extract.extract_text(file_bytes, fmt)
+    except ServiceError as e:
+        return jsonify({"error": e.message}), e.status_code
+
+    material_id = str(uuid.uuid4())
+    session_store.save_material_text(user_id, session_id, material_id, text)
+    data = session_store.add_material(user_id, session_id, material_id, filename, fmt, len(text))
+    if data is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(data), 201
+
+
+@bp.route("/sessions/<session_id>/materials/<material_id>", methods=["DELETE"])
+@user_auth.require_user
+def delete_material(session_id, material_id):
+    user_id = _current_user_id()
+    data = session_store.remove_material(user_id, session_id, material_id)
+    if data is None:
+        return jsonify({"error": "not_found"}), 404
+    session_store.delete_material_text(user_id, session_id, material_id)
+    return jsonify(data)
+
+
+# "Process" - the structured extraction pass (deepsink_background_extract)
+# over everything prep-related on the session so far: background_notes,
+# every uploaded material's text, and the prep_chat conversation.
+# Explicit/on-demand (a button in the web viewer), not triggered on
+# every background_notes save, since it's a real Codex call each time.
+@bp.route("/sessions/<session_id>/background/process", methods=["POST"])
+@user_auth.require_user
+def process_background(session_id):
+    user_id = _current_user_id()
+    data = _session_or_404(session_id)
+    if data is None:
+        return jsonify({"error": "not_found"}), 404
+
+    materials_text = "\n\n".join(
+        text for text in (
+            session_store.load_material_text(user_id, session_id, m["id"])
+            for m in data.get("materials") or []
+        ) if text
+    )
+
+    try:
+        result = deepsink_background_extract.handle({
+            "background_notes": data.get("background_notes") or "",
+            "materials_text": materials_text,
+            "prep_chat": data.get("prep_chat") or [],
+        })
+    except ServiceError as e:
+        return jsonify({"error": e.message}), e.status_code
+
+    updated = session_store.update_session(user_id, session_id, background_summary=result)
     return jsonify(updated)
 
 

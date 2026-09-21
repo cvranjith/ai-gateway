@@ -70,6 +70,7 @@ from services import deepsink_articulate
 from services import deepsink_diarize
 from services import deepsink_chat
 from services import deepsink_prepare
+from services import deepsink_background_extract
 from services.youtube_download import FILES_DIR
 from deepsink_sessions import bp as deepsink_sessions_bp
 from user_auth import ensure_bootstrap_user, verify_user_token
@@ -84,6 +85,7 @@ SERVICES = {
     "deepsink_diarize": deepsink_diarize.handle,
     "deepsink_chat": deepsink_chat.handle,
     "deepsink_prepare": deepsink_prepare.handle,
+    "deepsink_background_extract": deepsink_background_extract.handle,
 }
 
 CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
