@@ -142,6 +142,18 @@
   .action-item:last-child { border-bottom: none; }
   .action-item input[type=checkbox] { width: auto; margin-top: 3px; }
   .action-item.checked span { text-decoration: line-through; color: var(--muted); }
+  .action-meta { display: flex; gap: 6px; margin-top: 4px; }
+  .chip {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 100px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
 
   .notes-section { margin-bottom: 16px; }
   .notes-section:last-child { margin-bottom: 0; }
@@ -848,12 +860,54 @@ function renderActions() {
     el.innerHTML = `<div class="empty-state">No action items yet.</div>`;
     return;
   }
-  el.innerHTML = items.map(item => `
-    <div class="action-item ${item.is_checked ? "checked" : ""}">
-      <input type="checkbox" ${item.is_checked ? "checked" : ""} onchange="toggleActionItem('${item.id}', this.checked)">
-      <span>${escapeHtml(item.text)}${item.owner ? ` <span class="hint">(${escapeHtml(item.owner)})</span>` : ""}</span>
-    </div>
-  `).join("");
+  el.innerHTML = "";
+  items.forEach(item => {
+    const row = document.createElement("div");
+    row.className = "action-item" + (item.is_checked ? " checked" : "");
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = !!item.is_checked;
+    checkbox.onchange = () => toggleActionItem(item.id, checkbox.checked);
+    row.appendChild(checkbox);
+
+    const body = document.createElement("div");
+    body.style.flex = "1";
+    const textEl = document.createElement("span");
+    textEl.textContent = item.text;
+    body.appendChild(textEl);
+
+    const meta = document.createElement("div");
+    meta.className = "action-meta";
+    const ownerChip = document.createElement("button");
+    ownerChip.className = "chip";
+    ownerChip.textContent = item.owner || "+ Owner";
+    ownerChip.onclick = () => editActionItemField(item.id, "owner", item.owner);
+    const dueChip = document.createElement("button");
+    dueChip.className = "chip";
+    dueChip.textContent = item.due || "+ Due";
+    dueChip.onclick = () => editActionItemField(item.id, "due", item.due);
+    meta.appendChild(ownerChip);
+    meta.appendChild(dueChip);
+    body.appendChild(meta);
+
+    row.appendChild(body);
+    el.appendChild(row);
+  });
+}
+
+async function editActionItemField(itemId, field, currentValue) {
+  const label = field === "owner" ? "Owner" : "Due date (e.g. 2026-10-05)";
+  const value = prompt(label + ":", currentValue || "");
+  if (value === null) return; // cancelled
+  try {
+    currentSession = await api(`sessions/${currentSession.id}/action_items/${itemId}`, {
+      method: "PATCH", body: JSON.stringify({ [field]: value.trim() || null }),
+    });
+    renderActions();
+  } catch (e) {
+    if (e.message !== "unauthorized") alert("Error: " + e.message);
+  }
 }
 
 function renderPrepare() {
