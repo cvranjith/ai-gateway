@@ -161,6 +161,14 @@ def create_session(user_id, title, started_at=None, is_recording=False):
         # after recording) - this is the *prep* summary, generated
         # before anything's been recorded at all.
         "background_summary": None,
+        # False until the user actually renames the session themselves
+        # (see deepsink_sessions.py's patch_session, the only place this
+        # ever flips to True) - save_notes checks this before touching
+        # `title` at all, so an auto-generated title keeps updating
+        # freely (from Codex's own guess, refined as more transcript
+        # comes in) right up until a human deliberately overrides it,
+        # and never again after that.
+        "title_is_manual": False,
     }
     with _lock_for(user_id, session_id):
         _write(user_id, session_id, data)
@@ -245,7 +253,14 @@ def save_notes(user_id, session_id, notes_payload, action_items):
         data = _read(user_id, session_id)
         if data is None:
             return None
-        if notes_payload.get("title"):
+        # Never overwrites a title the user has deliberately set - see
+        # title_is_manual's own comment in create_session. Without this,
+        # a manual rename would survive only until the *next* chunk's
+        # background notes regen (which now fires automatically after
+        # every chunk, not just once at the end), silently reverting it
+        # back to whatever Codex generates - confirmed as a real bug the
+        # user actually hit, not a hypothetical.
+        if notes_payload.get("title") and not data.get("title_is_manual"):
             data["title"] = notes_payload["title"]
         data["notes"] = notes_payload
         data["action_items"] = action_items

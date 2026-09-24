@@ -164,6 +164,12 @@ def patch_session(session_id):
         if fields["stage"] != "recording":
             return jsonify({"error": "'stage' can only be set to 'recording' via this endpoint"}), 400
         fields["is_recording"] = True
+    if "title" in fields:
+        # A client explicitly setting the title IS the "human renamed
+        # this" signal - see title_is_manual's own comment in
+        # session_store.py. From here on, background notes regen never
+        # touches title again, no matter how many more chunks land.
+        fields["title_is_manual"] = True
     if not fields:
         return jsonify({"error": "no updatable fields in body"}), 400
     data = session_store.update_session(_current_user_id(), session_id, **fields)
