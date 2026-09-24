@@ -280,6 +280,10 @@ def _generate_notes(user_id, session_id):
             "transcript": transcript,
             "marker_hints": marker_hints,
             "background_notes": data.get("background_notes") or "",
+            # Just the date portion of the ISO started_at timestamp -
+            # for resolving relative due dates ("by next Friday")
+            # against when the meeting actually happened.
+            "meeting_date": (data.get("started_at") or "")[:10],
         })
     except ServiceError as e:
         session_store.mark_failed(user_id, session_id, e.message)

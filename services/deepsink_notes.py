@@ -10,6 +10,11 @@ params:
                      about the session (who's in the room, the agenda,
                      acronyms/jargon, prior history) - not part of the
                      transcript, just background for interpreting it.
+    meeting_date      (str, optional) - the session's own started_at
+                     date (e.g. "2026-09-24"), so relative references
+                     in the transcript ("by next Friday", "end of the
+                     month") can resolve to a real date instead of
+                     staying vague.
 
 result: the deepsink.notes JSON shape from requirement-deepsink-mobile.md
 FR-4, returned as a real JSON object (not a string) - DeepSink decodes
@@ -17,9 +22,15 @@ this straight into SessionNotesPayload:
     {
       "title": "...", "summary": "...",
       "key_points": ["..."], "decisions": ["..."],
-      "action_items": [{"text": "...", "owner": "me|<name>|unknown", "due": "<date>|null"}],
+      "action_items": [{"text": "...", "owner": "You"|"<name>"|null, "due": "<date>"|null}],
       "open_questions": ["..."]
     }
+`owner`/`due` are null (not a placeholder string like "unknown") when
+the transcript doesn't clearly support a guess - a client shows that
+as an empty, fillable field, not a word cluttering the UI. "You" is
+the literal convention for whoever's speaking/recording (first-person
+commitments - "I'll send that over"), so a later "show only mine" view
+has something concrete to filter on.
 
 Summarizes via Codex CLI, non-interactively - same subprocess pattern as
 youtube_summarizer._summarize_with_codex (instructions as the CLI arg,
@@ -47,8 +58,10 @@ Output ONLY a single JSON object, no markdown code fences, no commentary before 
 - "summary": a 2-4 sentence summary of what the meeting covered
 - "key_points": array of strings, the main points discussed
 - "decisions": array of strings, decisions that were made (empty array if none)
-- "action_items": array of objects {"text": str, "owner": "me" | "<name>" | "unknown", "due": "<date>" | null}
+- "action_items": array of objects {"text": str, "owner": "You" | "<name>" | null, "due": "<date>" | null}
 - "open_questions": array of strings, questions raised but not resolved (empty array if none)
+
+For each action item's "owner": use the literal string "You" when it's clearly a first-person commitment by whoever is speaking/recording ("I'll send that over", "let me follow up on X"); use a real name when the transcript names who it's for; use null (not a placeholder word) when genuinely unclear - leave it for a human to fill in rather than guessing. For "due": if the transcript gives a date, or a relative one ("by next Friday", "end of the month") that you can resolve against the meeting date provided below, use that real date; otherwise null.
 
 If the transcript doesn't clearly support a field, use an empty array (or empty string for "summary") rather than inventing content. If the user marked specific moments as important (see below, if present), weight those moments more heavily when deciding what counts as a key point, decision, or action item. If background notes are provided, use them to interpret the transcript correctly (names, acronyms, context) - they are not meeting content themselves and should not be echoed back into the summary or key points."""
 
@@ -76,6 +89,12 @@ def _build_background_section(background_notes):
     return f"Background provided by the user (not part of the transcript itself):\n{background_notes}\n\n"
 
 
+def _build_meeting_date_section(meeting_date):
+    if not meeting_date:
+        return ""
+    return f"This meeting's own date, for resolving relative due dates (\"next Friday\", etc.): {meeting_date}\n\n"
+
+
 def _extract_json(raw_text):
     text = raw_text.strip()
     # Codex sometimes wraps output in a ```json ... ``` fence despite being
@@ -92,7 +111,7 @@ def _extract_json(raw_text):
     return json.loads(text)
 
 
-def _generate_with_codex(transcript, marker_hints, background_notes):
+def _generate_with_codex(transcript, marker_hints, background_notes, meeting_date):
     model_id = (gateway_config.get_param(SERVICE_ID, "model_id", "") or "").strip()
     timeout_seconds = int(gateway_config.get_param(
         SERVICE_ID, "codex_timeout_seconds", DEFAULT_CODEX_TIMEOUT_SECONDS
@@ -110,6 +129,7 @@ def _generate_with_codex(transcript, marker_hints, background_notes):
 
     stdin_text = (
         _build_background_section(background_notes)
+        + _build_meeting_date_section(meeting_date)
         + _build_marker_section(marker_hints)
         + "Transcript:\n" + transcript
     )
@@ -153,5 +173,6 @@ def handle(params):
         raise ServiceError("'marker_hints' must be an array", 400)
 
     background_notes = (params.get("background_notes") or "").strip()
+    meeting_date = (params.get("meeting_date") or "").strip()
 
-    return _generate_with_codex(transcript, marker_hints, background_notes)
+    return _generate_with_codex(transcript, marker_hints, background_notes, meeting_date)
