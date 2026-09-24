@@ -276,15 +276,23 @@ def mark_failed(user_id, session_id, reason):
     return update_session(user_id, session_id, stage="failed", failure_reason=reason, is_generating_notes=False)
 
 
-def toggle_action_item(user_id, session_id, item_id, is_checked):
+def update_action_item(user_id, session_id, item_id, **fields):
+    # Generalized from the original toggle_action_item (is_checked
+    # only) to also cover owner/due - the model already leaves either
+    # null when it's genuinely not inferable from the transcript, and
+    # that's meant to be a fillable empty field, not a dead end.
     with _lock_for(user_id, session_id):
         data = _read(user_id, session_id)
         if data is None:
             return None
+        found = False
         for item in data["action_items"]:
             if item["id"] == item_id:
-                item["is_checked"] = is_checked
+                item.update(fields)
+                found = True
                 break
+        if not found:
+            return None
         _write(user_id, session_id, data)
         return data
 

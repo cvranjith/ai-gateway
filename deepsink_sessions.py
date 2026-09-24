@@ -345,11 +345,18 @@ def regenerate_notes(session_id):
 
 @bp.route("/sessions/<session_id>/action_items/<item_id>", methods=["PATCH"])
 @user_auth.require_user
-def toggle_action_item(session_id, item_id):
+def patch_action_item(session_id, item_id):
     body = request.get_json(silent=True) or {}
-    if "is_checked" not in body:
-        return jsonify({"error": "missing 'is_checked'"}), 400
-    data = session_store.toggle_action_item(_current_user_id(), session_id, item_id, bool(body["is_checked"]))
+    # is_checked (the checkbox) plus owner/due, now fillable by hand
+    # when the model left them null - same allowlist-and-merge shape as
+    # patch_session above, just scoped to one action item.
+    allowed = {"is_checked", "owner", "due"}
+    fields = {k: v for k, v in body.items() if k in allowed}
+    if "is_checked" in fields:
+        fields["is_checked"] = bool(fields["is_checked"])
+    if not fields:
+        return jsonify({"error": "no updatable fields in body"}), 400
+    data = session_store.update_action_item(_current_user_id(), session_id, item_id, **fields)
     if data is None:
         return jsonify({"error": "not_found"}), 404
     return jsonify(data)
