@@ -155,6 +155,20 @@
   }
   .chip:hover { border-color: var(--accent); color: var(--accent); }
 
+  .outstanding-group { margin-bottom: 18px; }
+  .outstanding-group:last-child { margin-bottom: 0; }
+  .outstanding-group-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    cursor: pointer;
+    margin-bottom: 4px;
+  }
+  .outstanding-group-title:hover { text-decoration: underline; }
+  .outstanding-filters { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+  .outstanding-filters label { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--muted); }
+  .outstanding-filters input[type=checkbox] { width: auto; }
+
   .notes-section { margin-bottom: 16px; }
   .notes-section:last-child { margin-bottom: 0; }
   .notes-section h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); margin: 0 0 6px; }
@@ -287,7 +301,10 @@
   <div id="list-view" hidden>
     <div class="topbar">
       <h1>DeepSink</h1>
-      <button class="secondary" onclick="logout()">Sign Out</button>
+      <div class="row" style="gap:8px">
+        <button class="secondary" onclick="showOutstanding()">Outstanding Actions</button>
+        <button class="secondary" onclick="logout()">Sign Out</button>
+      </div>
     </div>
 
     <div class="card">
@@ -304,6 +321,21 @@
 
     <div id="session-list"></div>
     <div id="list-empty" class="empty-state" hidden>No sessions yet.</div>
+  </div>
+
+  <div id="outstanding-view" hidden>
+    <span class="back-link" onclick="showList()">&larr; All sessions</span>
+    <div class="topbar">
+      <h1>Outstanding Actions</h1>
+    </div>
+    <div class="card">
+      <div class="outstanding-filters">
+        <label><input type="checkbox" id="outstanding-mine-only" onchange="renderOutstanding()"> Only mine (You)</label>
+        <label><input type="checkbox" id="outstanding-show-done" onchange="loadOutstanding()"> Show completed</label>
+      </div>
+      <div id="outstanding-content"></div>
+      <div id="outstanding-empty" class="empty-state" hidden>Nothing outstanding — you're all caught up.</div>
+    </div>
   </div>
 
   <div id="detail-view" hidden>
@@ -446,6 +478,7 @@ let hasSetInitialTab = false;
 // where the textarea held text the server didn't have yet.
 let backgroundDirty = false;
 let titleDirty = false;
+let outstandingItems = [];
 
 function getToken() { return sessionStorage.getItem(TOKEN_KEY); }
 function setToken(t) { sessionStorage.setItem(TOKEN_KEY, t); }
@@ -453,6 +486,7 @@ function clearToken() { sessionStorage.removeItem(TOKEN_KEY); }
 
 function showLogin(message) {
   document.getElementById("list-view").hidden = true;
+  document.getElementById("outstanding-view").hidden = true;
   document.getElementById("detail-view").hidden = true;
   document.getElementById("login-screen").hidden = false;
   document.getElementById("wrap").classList.remove("wide");
@@ -465,15 +499,29 @@ function showList() {
   stopPolling();
   closeLiveStream();
   document.getElementById("login-screen").hidden = true;
+  document.getElementById("outstanding-view").hidden = true;
   document.getElementById("detail-view").hidden = true;
   document.getElementById("list-view").hidden = false;
   document.getElementById("wrap").classList.remove("wide");
   loadSessions();
 }
 
+function showOutstanding() {
+  currentSession = null;
+  stopPolling();
+  closeLiveStream();
+  document.getElementById("login-screen").hidden = true;
+  document.getElementById("list-view").hidden = true;
+  document.getElementById("detail-view").hidden = true;
+  document.getElementById("outstanding-view").hidden = false;
+  document.getElementById("wrap").classList.remove("wide");
+  loadOutstanding();
+}
+
 function showDetail(id) {
   document.getElementById("login-screen").hidden = true;
   document.getElementById("list-view").hidden = true;
+  document.getElementById("outstanding-view").hidden = true;
   document.getElementById("detail-view").hidden = false;
   document.getElementById("wrap").classList.add("wide");
   document.getElementById("chat-log").innerHTML = "";
@@ -905,6 +953,132 @@ async function editActionItemField(itemId, field, currentValue) {
       method: "PATCH", body: JSON.stringify({ [field]: value.trim() || null }),
     });
     renderActions();
+  } catch (e) {
+    if (e.message !== "unauthorized") alert("Error: " + e.message);
+  }
+}
+
+// The cross-session "outstanding action items" dashboard - a flat
+// rollup fetched from GET /deepsink/action_items (see that route's own
+// comment in deepsink_sessions.py), grouped back by session client-side
+// for display. Each item still carries its session_id, so toggling or
+// editing here PATCHes the exact same per-item endpoint the Actions tab
+// uses - there's no separate "dashboard" copy of an action item.
+async function loadOutstanding() {
+  const content = document.getElementById("outstanding-content");
+  const empty = document.getElementById("outstanding-empty");
+  const includeDone = document.getElementById("outstanding-show-done").checked;
+  try {
+    const data = await api("action_items" + (includeDone ? "?include_done=1" : ""));
+    outstandingItems = data.action_items || [];
+    renderOutstanding();
+  } catch (e) {
+    if (e.message !== "unauthorized") content.innerHTML = `<div class="error">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderOutstanding() {
+  const content = document.getElementById("outstanding-content");
+  const empty = document.getElementById("outstanding-empty");
+  const mineOnly = document.getElementById("outstanding-mine-only").checked;
+  const items = mineOnly ? outstandingItems.filter(it => it.owner === "You") : outstandingItems;
+
+  if (items.length === 0) {
+    content.innerHTML = "";
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+
+  // Groups preserve the rollup's own soonest-due-first order (the
+  // server already sorted it that way) - just clustering consecutive
+  // items under the same session under one header rather than
+  // re-sorting by session.
+  const groups = [];
+  items.forEach(item => {
+    const last = groups[groups.length - 1];
+    if (last && last.session_id === item.session_id) { last.items.push(item); return; }
+    groups.push({ session_id: item.session_id, session_title: item.session_title, items: [item] });
+  });
+
+  content.innerHTML = "";
+  groups.forEach(group => {
+    const groupEl = document.createElement("div");
+    groupEl.className = "outstanding-group";
+    const title = document.createElement("div");
+    title.className = "outstanding-group-title";
+    title.textContent = group.session_title;
+    title.onclick = () => showDetail(group.session_id);
+    groupEl.appendChild(title);
+
+    group.items.forEach(item => {
+      const row = document.createElement("div");
+      row.className = "action-item" + (item.is_checked ? " checked" : "");
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = !!item.is_checked;
+      checkbox.onchange = () => toggleOutstandingActionItem(item, checkbox.checked);
+      row.appendChild(checkbox);
+
+      const body = document.createElement("div");
+      body.style.flex = "1";
+      const textEl = document.createElement("span");
+      textEl.textContent = item.text;
+      body.appendChild(textEl);
+
+      const meta = document.createElement("div");
+      meta.className = "action-meta";
+      const ownerChip = document.createElement("button");
+      ownerChip.className = "chip";
+      ownerChip.textContent = item.owner || "+ Owner";
+      ownerChip.onclick = () => editOutstandingActionItemField(item, "owner");
+      const dueChip = document.createElement("button");
+      dueChip.className = "chip";
+      dueChip.textContent = item.due || "+ Due";
+      dueChip.onclick = () => editOutstandingActionItemField(item, "due");
+      meta.appendChild(ownerChip);
+      meta.appendChild(dueChip);
+      body.appendChild(meta);
+
+      row.appendChild(body);
+      groupEl.appendChild(row);
+    });
+    content.appendChild(groupEl);
+  });
+}
+
+async function toggleOutstandingActionItem(item, isChecked) {
+  try {
+    await api(`sessions/${item.session_id}/action_items/${item.id}`, {
+      method: "PATCH", body: JSON.stringify({ is_checked: isChecked }),
+    });
+    item.is_checked = isChecked;
+    // A completed item vanishes from the "outstanding" list on the next
+    // load rather than the next click - re-fetching immediately (rather
+    // than just re-rendering) so the count/list matches the server as
+    // soon as the checkbox lands, same as toggleActionItem's own
+    // re-render-from-server discipline in the session detail view.
+    if (!document.getElementById("outstanding-show-done").checked && isChecked) {
+      await loadOutstanding();
+    } else {
+      renderOutstanding();
+    }
+  } catch (e) {
+    if (e.message !== "unauthorized") { alert("Error: " + e.message); renderOutstanding(); }
+  }
+}
+
+async function editOutstandingActionItemField(item, field) {
+  const label = field === "owner" ? "Owner" : "Due date (e.g. 2026-10-05)";
+  const value = prompt(label + ":", item[field] || "");
+  if (value === null) return; // cancelled
+  try {
+    await api(`sessions/${item.session_id}/action_items/${item.id}`, {
+      method: "PATCH", body: JSON.stringify({ [field]: value.trim() || null }),
+    });
+    item[field] = value.trim() || null;
+    renderOutstanding();
   } catch (e) {
     if (e.message !== "unauthorized") alert("Error: " + e.message);
   }
