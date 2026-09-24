@@ -362,6 +362,35 @@ def patch_action_item(session_id, item_id):
     return jsonify(data)
 
 
+@bp.route("/action_items", methods=["GET"])
+@user_auth.require_user
+def list_all_action_items():
+    # Cross-session rollup for the "outstanding action items" dashboard
+    # - flattens every session's action_items into one list, each item
+    # tagged with which session it came from so the client can both
+    # display and (via the existing per-item PATCH route above) toggle
+    # it without a second round trip. Done items are left out by default
+    # since the whole point is "what's still outstanding," but a client
+    # can ask for everything to show a completed history too.
+    include_done = request.args.get("include_done") == "1"
+    items = []
+    for session in session_store.list_sessions(_current_user_id()):
+        for item in session.get("action_items") or []:
+            if not include_done and item.get("is_checked"):
+                continue
+            items.append({
+                **item,
+                "session_id": session["id"],
+                "session_title": session.get("title") or "Untitled session",
+                "session_started_at": session.get("started_at"),
+            })
+    # Soonest-due first; undated items sink to the bottom (grouped by
+    # newest session first within each group) rather than sorting as if
+    # an empty due date were "earliest."
+    items.sort(key=lambda it: (0 if it.get("due") else 1, it.get("due") or "", it.get("session_started_at") or ""))
+    return jsonify({"action_items": items})
+
+
 @bp.route("/sessions/<session_id>/markers", methods=["POST"])
 @user_auth.require_user
 def add_marker(session_id):
