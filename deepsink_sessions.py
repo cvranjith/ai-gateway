@@ -122,9 +122,11 @@ def create_session():
     # builds). DeepSink's mobile app can pass false explicitly to start a
     # "record now, polish once at the end" session instead.
     live_notes_enabled = bool(body.get("live_notes_enabled", True))
+    category = (body.get("category") or "meeting").strip()
+    diarization_enabled = bool(body.get("diarization_enabled", True))
     data = session_store.create_session(
         _current_user_id(), title=title, started_at=body.get("started_at"), is_recording=is_recording,
-        live_notes_enabled=live_notes_enabled,
+        live_notes_enabled=live_notes_enabled, category=category, diarization_enabled=diarization_enabled,
     )
     return jsonify(data), 201
 
@@ -164,7 +166,10 @@ def patch_session(session_id):
     # see that field's own comment in session_store.py for why that,
     # not stage, is what live_preview/the web viewer's live-stream
     # actually key off.
-    allowed = {"title", "background_notes", "duration_seconds", "recording_incomplete", "stage", "live_notes_enabled"}
+    allowed = {
+        "title", "background_notes", "duration_seconds", "recording_incomplete", "stage",
+        "live_notes_enabled", "category", "diarization_enabled",
+    }
     fields = {k: v for k, v in body.items() if k in allowed}
     if "stage" in fields:
         if fields["stage"] != "recording":
@@ -178,6 +183,10 @@ def patch_session(session_id):
         fields["title_is_manual"] = True
     if "live_notes_enabled" in fields:
         fields["live_notes_enabled"] = bool(fields["live_notes_enabled"])
+    if "diarization_enabled" in fields:
+        fields["diarization_enabled"] = bool(fields["diarization_enabled"])
+    if "category" in fields:
+        fields["category"] = (fields["category"] or "meeting").strip()
     if not fields:
         return jsonify({"error": "no updatable fields in body"}), 400
     data = session_store.update_session(_current_user_id(), session_id, **fields)
@@ -230,6 +239,18 @@ def upload_chunk(session_id):
         result.get("blocks", []),
     )
     live_preview.clear(f"{user_id}:{session_id}")
+    # Diarization is the only reason this server needs to hold onto raw
+    # audio past transcription at all - with it off for this session,
+    # there's nothing else that will ever read this chunk's audio file
+    # again, so delete it now rather than letting it sit on disk for the
+    # rest of the recording (and the whole session-lifetime after that).
+    # Safe to just clear the whole chunks dir here rather than only this
+    # one file: with diarization off from the start, every earlier chunk
+    # already got deleted the same way when IT landed, so this is the
+    # only file left in it.
+    if not data.get("diarization_enabled", True):
+        session_store.delete_chunk_audio(user_id, session_id)
+        data = session_store.update_session(user_id, session_id, audio_deleted=True)
     # Only when there's actually something to summarize - an empty (or
     # silent) chunk means an empty transcript, and deepsink_notes treats
     # that as a real error (marks the session "failed"), which is right
@@ -295,6 +316,7 @@ def _generate_notes(user_id, session_id):
             # for resolving relative due dates ("by next Friday")
             # against when the meeting actually happened.
             "meeting_date": (data.get("started_at") or "")[:10],
+            "category": data.get("category") or "meeting",
         })
     except ServiceError as e:
         # A cancel that arrived while Codex was running isn't a real
@@ -363,8 +385,13 @@ def finish_session(session_id):
     # like notes above - diarizing is real CPU-minutes, only worth
     # paying once there's a final, complete transcript. Manual "Detect
     # Speakers" (the /diarize route below) still exists for a re-run
-    # after an edit, or for a session finished before this existed.
-    _trigger_background_diarize(user_id, session_id)
+    # after an edit, or for a session finished before this existed. Skips
+    # entirely when diarization_enabled is False - and in that case
+    # there's no audio left to diarize anyway, since upload_chunk already
+    # deleted each chunk's audio as it landed (see that route's own
+    # comment).
+    if (data or {}).get("diarization_enabled", True):
+        _trigger_background_diarize(user_id, session_id)
     return jsonify(data)
 
 

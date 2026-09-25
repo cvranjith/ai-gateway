@@ -101,6 +101,8 @@ _SCHEMA_DEFAULTS = {
     "title_is_manual": False,
     "live_notes_enabled": True,
     "notes_generation_cancelled": False,
+    "category": "meeting",
+    "diarization_enabled": True,
 }
 
 
@@ -132,7 +134,10 @@ def _write(user_id, session_id, data):
     tmp_path.replace(path)
 
 
-def create_session(user_id, title, started_at=None, is_recording=False, live_notes_enabled=True):
+def create_session(
+    user_id, title, started_at=None, is_recording=False, live_notes_enabled=True,
+    category="meeting", diarization_enabled=True,
+):
     session_id = str(uuid.uuid4())
     data = {
         "id": session_id,
@@ -140,6 +145,23 @@ def create_session(user_id, title, started_at=None, is_recording=False, live_not
         "started_at": started_at or _now(),
         "duration_seconds": 0,
         "background_notes": "",
+        # One of "meeting" | "todo" | "voice_note" - chosen on DeepSink's
+        # recording-start screen, passed straight through to
+        # deepsink_notes.handle() (see INSTRUCTIONS_BY_CATEGORY there) so
+        # the SAME notes JSON shape gets a different emphasis depending on
+        # what this recording actually is: full structured notes for a
+        # meeting, a checklist-first pass for a personal to-do capture, or
+        # a light free-form summary for a voice memo. Not validated
+        # against a fixed set server-side - an unrecognized value just
+        # falls back to "meeting" behavior in deepsink_notes.py.
+        "category": category,
+        # When False, _trigger_background_diarize (deepsink_sessions.py's
+        # /finish) is skipped, and each chunk's audio is deleted right
+        # after it transcribes (upload_chunk) instead of being kept
+        # around for a diarization pass that will never run - diarization
+        # is the only reason this server needs to hold onto raw audio
+        # past transcription at all.
+        "diarization_enabled": bool(diarization_enabled),
         # "ready" (an empty, nothing-pending session - a true, if
         # slightly vacuous, description) rather than "recording" for a
         # session nobody's actually recording yet - e.g. one prepared

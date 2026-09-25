@@ -51,19 +51,42 @@ from .errors import ServiceError
 SERVICE_ID = "deepsink_notes"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 180
 
-INSTRUCTIONS = """You are producing structured meeting notes from a raw speech-to-text transcript pasted below. The transcript may contain transcription errors, filler words, and missing punctuation - do your best to infer intent rather than transcribing literally.
-
-Output ONLY a single JSON object, no markdown code fences, no commentary before or after it, with exactly these keys:
-- "title": a short (under 8 words) descriptive title for the meeting
-- "summary": a 2-4 sentence summary of what the meeting covered
-- "key_points": array of strings, the main points discussed
+# Same output JSON schema across all three - the client (SessionNotesPayload)
+# never needs to know which category produced a given session's notes, only
+# the emphasis Codex is told to give each field shifts. "meeting" is the
+# original, unchanged instructions; the other two are for the same session
+# categories DeepSink's own recording-start screen lets you pick, per the
+# 2026-09-25 conversation ("sometimes I want to use this as a self to-do
+# creator... or just keep it in my memory").
+_SCHEMA_KEYS = """Output ONLY a single JSON object, no markdown code fences, no commentary before or after it, with exactly these keys:
+- "title": a short (under 8 words) descriptive title
+- "summary": a short summary of what was said
+- "key_points": array of strings, the main points
 - "decisions": array of strings, decisions that were made (empty array if none)
 - "action_items": array of objects {"text": str, "owner": "You" | "<name>" | null, "due": "<date>" | null}
 - "open_questions": array of strings, questions raised but not resolved (empty array if none)
 
-For each action item's "owner": use the literal string "You" when it's clearly a first-person commitment by whoever is speaking/recording ("I'll send that over", "let me follow up on X"); use a real name when the transcript names who it's for; use null (not a placeholder word) when genuinely unclear - leave it for a human to fill in rather than guessing. For "due": if the transcript gives a date, or a relative one ("by next Friday", "end of the month") that you can resolve against the meeting date provided below, use that real date; otherwise null.
+For each action item's "owner": use the literal string "You" when it's clearly a first-person commitment by whoever is speaking/recording ("I'll send that over", "let me follow up on X"); use a real name when the transcript names who it's for; use null (not a placeholder word) when genuinely unclear - leave it for a human to fill in rather than guessing. For "due": if the transcript gives a date, or a relative one ("by next Friday", "end of the month") that you can resolve against the date provided below, use that real date; otherwise null."""
 
-If the transcript doesn't clearly support a field, use an empty array (or empty string for "summary") rather than inventing content. If the user marked specific moments as important (see below, if present), weight those moments more heavily when deciding what counts as a key point, decision, or action item. If background notes are provided, use them to interpret the transcript correctly (names, acronyms, context) - they are not meeting content themselves and should not be echoed back into the summary or key points."""
+INSTRUCTIONS_BY_CATEGORY = {
+    "meeting": f"""You are producing structured meeting notes from a raw speech-to-text transcript pasted below. The transcript may contain transcription errors, filler words, and missing punctuation - do your best to infer intent rather than transcribing literally.
+
+{_SCHEMA_KEYS}
+
+"summary" should be 2-4 sentences covering what the meeting covered. If the transcript doesn't clearly support a field, use an empty array (or empty string for "summary") rather than inventing content. If the user marked specific moments as important (see below, if present), weight those moments more heavily when deciding what counts as a key point, decision, or action item. If background notes are provided, use them to interpret the transcript correctly (names, acronyms, context) - they are not meeting content themselves and should not be echoed back into the summary or key points.""",
+
+    "todo": f"""You are extracting a personal to-do list from a raw speech-to-text transcript pasted below - this is someone thinking out loud or dictating tasks to themselves, NOT a meeting. The transcript may contain transcription errors, filler words, and missing punctuation - do your best to infer intent rather than transcribing literally.
+
+{_SCHEMA_KEYS}
+
+Treat "action_items" as the whole point of this - capture every actionable thing said, even something said only in passing, as its own action item. Default an action item's "owner" to "You" unless the transcript clearly assigns it to someone else. "summary" should be a single short sentence at most (can be empty). "key_points" should usually just restate the action items in short form, or be empty if action_items already covers everything. "decisions" and "open_questions" will normally be empty - only fill them if something genuinely fits that isn't better captured as an action item.""",
+
+    "voice_note": f"""You are producing a light note from a raw speech-to-text transcript pasted below - this is a personal voice memo / note-to-self, NOT a meeting. The transcript may contain transcription errors, filler words, and missing punctuation - do your best to infer intent rather than transcribing literally.
+
+{_SCHEMA_KEYS}
+
+Produce a free-form "summary" (2-5 sentences) that captures what was said and why it might matter later - don't force meeting-style structure onto it. "key_points" should only be used if there are genuinely distinct points worth calling out separately; often this can be empty with everything captured in the summary instead. "action_items" should stay empty unless something is an unmistakable concrete commitment ("I need to call the dentist tomorrow") - most voice notes have none. "decisions" and "open_questions" will almost always be empty.""",
+}
 
 
 def _format_offset(seconds):
@@ -111,11 +134,12 @@ def _extract_json(raw_text):
     return json.loads(text)
 
 
-def _generate_with_codex(transcript, marker_hints, background_notes, meeting_date):
+def _generate_with_codex(transcript, marker_hints, background_notes, meeting_date, category):
     model_id = (gateway_config.get_param(SERVICE_ID, "model_id", "") or "").strip()
     timeout_seconds = int(gateway_config.get_param(
         SERVICE_ID, "codex_timeout_seconds", DEFAULT_CODEX_TIMEOUT_SECONDS
     ))
+    instructions = INSTRUCTIONS_BY_CATEGORY.get(category, INSTRUCTIONS_BY_CATEGORY["meeting"])
 
     cmd = [
         "codex", "exec",
@@ -138,7 +162,7 @@ def _generate_with_codex(transcript, marker_hints, background_notes, meeting_dat
     os.close(output_fd)
     try:
         result = subprocess.run(
-            cmd + ["-o", output_path, INSTRUCTIONS],
+            cmd + ["-o", output_path, instructions],
             input=stdin_text,
             capture_output=True,
             text=True,
@@ -174,5 +198,6 @@ def handle(params):
 
     background_notes = (params.get("background_notes") or "").strip()
     meeting_date = (params.get("meeting_date") or "").strip()
+    category = (params.get("category") or "meeting").strip()
 
-    return _generate_with_codex(transcript, marker_hints, background_notes, meeting_date)
+    return _generate_with_codex(transcript, marker_hints, background_notes, meeting_date, category)
