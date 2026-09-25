@@ -67,12 +67,57 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+# Every field create_session has ever added, besides the handful always
+# present from day one (id/title/started_at/...). A session written
+# before a given field existed simply doesn't have that key in its JSON
+# - harmless for this Python code (dict.get(...) everywhere already
+# tolerates that), but DeepSink's mobile app decodes the whole session
+# as a non-optional Swift struct, so a single old session missing a
+# newer key breaks decoding of the ENTIRE sessions list response (one
+# bad element fails the whole array decode) - confirmed as a real,
+# reported bug: older sessions disappeared from the phone (still
+# visible on the web viewer, which is far more tolerant of missing
+# JSON keys) the moment live_notes_enabled/notes_generation_cancelled
+# were added, while a session created after that kept working. Backfilling
+# on every read, rather than a one-off migration script, means this
+# can never happen again regardless of which client reads an old file
+# next or how old it is.
+_SCHEMA_DEFAULTS = {
+    "recording_incomplete": False,
+    "audio_deleted": False,
+    "chunks": list,
+    "transcript_blocks": list,
+    "notes": None,
+    "action_items": list,
+    "markers": list,
+    "speakers": list,
+    "is_diarizing": False,
+    "diarization_error": None,
+    "is_generating_notes": False,
+    "is_recording": False,
+    "prep_chat": list,
+    "materials": list,
+    "background_summary": None,
+    "title_is_manual": False,
+    "live_notes_enabled": True,
+    "notes_generation_cancelled": False,
+}
+
+
+def _backfill_defaults(data):
+    for key, default in _SCHEMA_DEFAULTS.items():
+        if key not in data:
+            data[key] = default() if callable(default) else default
+    return data
+
+
 def _read(user_id, session_id):
     path = _session_path(user_id, session_id)
     if not path.exists():
         return None
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    return _backfill_defaults(data)
 
 
 def _write(user_id, session_id, data):
