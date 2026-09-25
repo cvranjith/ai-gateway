@@ -87,7 +87,7 @@ def _write(user_id, session_id, data):
     tmp_path.replace(path)
 
 
-def create_session(user_id, title, started_at=None, is_recording=False):
+def create_session(user_id, title, started_at=None, is_recording=False, live_notes_enabled=True):
     session_id = str(uuid.uuid4())
     data = {
         "id": session_id,
@@ -169,6 +169,23 @@ def create_session(user_id, title, started_at=None, is_recording=False):
         # comes in) right up until a human deliberately overrides it,
         # and never again after that.
         "title_is_manual": False,
+        # When False, a landing chunk's transcript still gets stored as
+        # usual, but _trigger_background_regen (deepsink_sessions.py) skips
+        # firing notes/action-items generation for it - "record now,
+        # polish once at the end" instead of the default progressive
+        # regen-after-every-chunk behavior. Settable at creation and
+        # PATCH-able mid-recording (see patch_session), so it can be
+        # flipped either way without stopping the recording.
+        "live_notes_enabled": bool(live_notes_enabled),
+        # Set by POST .../notes/cancel while a generation is in flight;
+        # checked by _generate_notes right before it would persist a
+        # result, so that result is discarded instead of saved - a
+        # "soft cancel" (the Codex subprocess itself still runs to
+        # completion server-side) rather than actually killing a
+        # process, which is real process-management work not justified
+        # for a personal, single-user server. Reset to False at the
+        # start of every new generation.
+        "notes_generation_cancelled": False,
     }
     with _lock_for(user_id, session_id):
         _write(user_id, session_id, data)

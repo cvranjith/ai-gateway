@@ -117,8 +117,14 @@ def create_session():
     # recorded. DeepSink's mobile app passes true explicitly, since it
     # only ever calls this as part of immediately starting to record.
     is_recording = bool(body.get("is_recording"))
+    # Defaults to True - matches the existing progressive-regen behavior
+    # for any client that doesn't send this (the web viewer, older app
+    # builds). DeepSink's mobile app can pass false explicitly to start a
+    # "record now, polish once at the end" session instead.
+    live_notes_enabled = bool(body.get("live_notes_enabled", True))
     data = session_store.create_session(
-        _current_user_id(), title=title, started_at=body.get("started_at"), is_recording=is_recording
+        _current_user_id(), title=title, started_at=body.get("started_at"), is_recording=is_recording,
+        live_notes_enabled=live_notes_enabled,
     )
     return jsonify(data), 201
 
@@ -158,7 +164,7 @@ def patch_session(session_id):
     # see that field's own comment in session_store.py for why that,
     # not stage, is what live_preview/the web viewer's live-stream
     # actually key off.
-    allowed = {"title", "background_notes", "duration_seconds", "recording_incomplete", "stage"}
+    allowed = {"title", "background_notes", "duration_seconds", "recording_incomplete", "stage", "live_notes_enabled"}
     fields = {k: v for k, v in body.items() if k in allowed}
     if "stage" in fields:
         if fields["stage"] != "recording":
@@ -170,6 +176,8 @@ def patch_session(session_id):
         # session_store.py. From here on, background notes regen never
         # touches title again, no matter how many more chunks land.
         fields["title_is_manual"] = True
+    if "live_notes_enabled" in fields:
+        fields["live_notes_enabled"] = bool(fields["live_notes_enabled"])
     if not fields:
         return jsonify({"error": "no updatable fields in body"}), 400
     data = session_store.update_session(_current_user_id(), session_id, **fields)
@@ -228,7 +236,7 @@ def upload_chunk(session_id):
     # for an explicit /finish with nothing recorded but wrong to trigger
     # invisibly in the background off a single quiet chunk early in an
     # otherwise-normal recording.
-    if data["transcript_blocks"]:
+    if data["transcript_blocks"] and data.get("live_notes_enabled", True):
         _trigger_background_regen(user_id, session_id)
     return jsonify(data)
 
@@ -263,9 +271,12 @@ def _generate_notes(user_id, session_id):
     # Set immediately, before the (possibly slow) Codex call - this is
     # what lets a viewer show a "generating notes" spinner instead of a
     # plain empty tab while it's in flight. Cleared by whichever exit
-    # path is actually taken below (mark_failed or save_notes both set
-    # it back to False as part of their own single write).
-    session_store.update_session(user_id, session_id, is_generating_notes=True)
+    # path is actually taken below (mark_failed, save_notes, and the two
+    # cancellation checks below all set it back to False as part of
+    # their own write). notes_generation_cancelled is reset here too, in
+    # case a previous cancel arrived after its own generation had
+    # already finished - it shouldn't discard THIS one.
+    session_store.update_session(user_id, session_id, is_generating_notes=True, notes_generation_cancelled=False)
 
     transcript = " ".join(
         block["text"] for block in sorted(data["transcript_blocks"], key=lambda b: b["start"])
@@ -286,8 +297,31 @@ def _generate_notes(user_id, session_id):
             "meeting_date": (data.get("started_at") or "")[:10],
         })
     except ServiceError as e:
+        # A cancel that arrived while Codex was running isn't a real
+        # failure from the user's own perspective (they walked away, it
+        # didn't break) - don't mark the session failed over it, just
+        # clear the spinner and the flag.
+        if (session_store.get_session(user_id, session_id) or {}).get("notes_generation_cancelled"):
+            cleared = session_store.update_session(
+                user_id, session_id, is_generating_notes=False, notes_generation_cancelled=False
+            )
+            return cleared, None
         session_store.mark_failed(user_id, session_id, e.message)
         return None, (jsonify({"error": e.message}), e.status_code)
+
+    # Soft-cancel: POST .../notes/cancel sets this flag while this call
+    # was in flight above. Rather than killing the Codex subprocess (real
+    # process-management work not justified for a personal, single-user
+    # server), the result is simply discarded here instead of saved -
+    # same effect as if this generation had never run. There's never more
+    # than one generation in flight per session at once (see the lock in
+    # _trigger_background_regen and regenerate_notes's own equivalent),
+    # so a single flag is enough to know this result is the cancelled one.
+    if (session_store.get_session(user_id, session_id) or {}).get("notes_generation_cancelled"):
+        cleared = session_store.update_session(
+            user_id, session_id, is_generating_notes=False, notes_generation_cancelled=False
+        )
+        return cleared, None
 
     # Matched by exact text, since generated action items have no stable
     # ID across a regenerate - the same reconciliation DeepSink's mobile
@@ -340,6 +374,26 @@ def regenerate_notes(session_id):
     data, error_response = _generate_notes(_current_user_id(), session_id)
     if error_response is not None:
         return error_response
+    return jsonify(data)
+
+
+@bp.route("/sessions/<session_id>/notes/cancel", methods=["POST"])
+@user_auth.require_user
+def cancel_notes_generation(session_id):
+    # Runs on its own request/thread (the gateway's Flask server is
+    # threaded) while a POST .../notes/regenerate for the same session is
+    # still blocked in another one - clears is_generating_notes right
+    # away so the UI's spinner disappears immediately, and sets the flag
+    # _generate_notes checks right before it would persist a result, so
+    # that result gets discarded instead of saved once Codex actually
+    # finishes. See notes_generation_cancelled's own comment in
+    # session_store.py for why this is a soft cancel, not a real kill of
+    # the underlying Codex subprocess.
+    data = session_store.update_session(
+        _current_user_id(), session_id, is_generating_notes=False, notes_generation_cancelled=True
+    )
+    if data is None:
+        return jsonify({"error": "not_found"}), 404
     return jsonify(data)
 
 
