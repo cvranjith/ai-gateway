@@ -8,12 +8,17 @@ getting a session-local placeholder.
 Populated the only way a real name enters the system at all: renaming
 a speaker (see deepsink_sessions.py's rename_speaker route) saves/
 updates that name's roster entry using the embedding pyannote computed
-for that speaker in that session (session_store.py's
-save/load_speaker_embeddings) — no separate enrollment flow needed;
-naming someone once IS the enrollment. Diarizing again later (this
-person, or anyone else in the same conversation) checks the roster and
-auto-applies a matching name instead of "Person N" — see
-deepsink_sessions.py's _apply_diarization.
+for that speaker in that session (session_store.py's own, session-local
+live_speaker_roster) — no separate enrollment flow needed; naming
+someone once IS the enrollment. Diarizing again later (this person, or
+anyone else in the same conversation) checks the roster and auto-applies
+a matching name instead of "Person N" — see deepsink_sessions.py's
+_build_speaker_display_list.
+
+This module also holds match_live_roster()/upsert_live_roster() below,
+the same cosine-similarity technique applied WITHIN one session instead
+of across them - see their own comments for why that's a separate thing
+from the cross-session roster above.
 
 Small scale by design (a personal app's own regulars — tens of people,
 not thousands), so brute-force cosine similarity against every roster
@@ -41,6 +46,14 @@ from session_store import SESSIONS_DIR
 # names start getting applied, lower it if genuine matches are being
 # missed.
 DEFAULT_SIMILARITY_THRESHOLD = 0.5
+
+
+def live_similarity_threshold():
+    """Config-driven threshold for match_live_roster() below - a small
+    accessor so callers (deepsink_sessions.py) don't need their own
+    `import config` just for this one value."""
+    return float(gateway_config.get_param("speaker_roster", "live_similarity_threshold", DEFAULT_LIVE_SIMILARITY_THRESHOLD))
+
 
 _locks_guard = threading.Lock()
 _locks = {}
@@ -102,6 +115,56 @@ def match(user_id, embedding):
         if score > best_score:
             best_name, best_score = entry["name"], score
     return best_name
+
+
+# A starting point for the SAME matching technique applied within one
+# session instead of across them (see deepsink_sessions.py's incremental
+# diarization pipeline: fast per-chunk pass, periodic consolidation,
+# final catchup - each a separate pyannote call whose own "SPEAKER_00"-
+# style labels mean nothing across calls, stitched back into one stable
+# identity per session via this same cosine-similarity match). Kept as
+# its own config key rather than reusing similarity_threshold above:
+# these embeddings are being compared within the same recording
+# environment/mic/day, where voices should read as more consistent with
+# each other than across entirely different sessions, so the right
+# value likely isn't identical - exposed separately so each can be tuned
+# against its own real usage once there's data for it.
+DEFAULT_LIVE_SIMILARITY_THRESHOLD = 0.5
+
+
+def match_live_roster(roster, embedding, threshold):
+    """Same idea as match() above, but against an arbitrary in-memory
+    roster (a session's own, still-growing list of {"id", "embedding"}
+    entries) rather than the persistent per-user named one. Returns
+    (matched_id, score) - matched_id is None if nothing clears
+    `threshold` (including an empty roster)."""
+    if not embedding:
+        return None, 0.0
+    best_id, best_score = None, threshold
+    for entry in roster:
+        score = _cosine_similarity(embedding, entry["embedding"])
+        if score > best_score:
+            best_id, best_score = entry["id"], score
+    return best_id, best_score
+
+
+def upsert_live_roster(roster, speaker_id, embedding):
+    """Adds/updates an entry in an in-memory live-roster list (mutates
+    it in place and also returns it for convenience) - same running-mean
+    embedding idea as upsert() above, keyed by a session-local stable id
+    instead of a real name."""
+    if not embedding:
+        return roster
+    for entry in roster:
+        if entry["id"] == speaker_id:
+            n = entry.get("sample_count", 1)
+            old = np.array(entry["embedding"], dtype=float)
+            new = np.array(embedding, dtype=float)
+            entry["embedding"] = (((old * n) + new) / (n + 1)).tolist()
+            entry["sample_count"] = n + 1
+            return roster
+    roster.append({"id": speaker_id, "embedding": embedding, "sample_count": 1})
+    return roster
 
 
 def upsert(user_id, name, embedding):

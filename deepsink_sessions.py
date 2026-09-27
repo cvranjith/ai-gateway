@@ -84,6 +84,40 @@ def _regen_lock_for(user_id, session_id):
         return _regen_locks[key]
 
 
+# Guards ALL diarization work for one session - fast (per-chunk),
+# consolidated (periodic ~10-min window), and final (at /finish) passes
+# all take this same lock, never run concurrently against each other.
+# They'd otherwise race on the same session-local live speaker roster
+# (session_store's live_speaker_roster.json) and on which pass's
+# transcript_blocks retagging lands last. Fast/consolidated triggers
+# acquire non-blocking and just skip when busy (the next chunk, or the
+# next consolidation check, naturally catches up); the final catchup at
+# /finish blocks until whatever's in flight finishes, since that's the
+# one moment that actually needs to wait rather than skip.
+_diarize_locks_guard = threading.Lock()
+_diarize_locks = {}
+
+
+def _diarize_lock_for(user_id, session_id):
+    key = (user_id, session_id)
+    with _diarize_locks_guard:
+        if key not in _diarize_locks:
+            _diarize_locks[key] = threading.Lock()
+        return _diarize_locks[key]
+
+
+# How much session-absolute audio the "consolidated" tier processes per
+# pass - see _maybe_run_consolidation_pass. Deliberately a fixed WINDOW
+# (each pass only re-diarizes its own fresh 10 minutes, not everything
+# since the session started) rather than a cumulative one: diarizing the
+# same earlier audio again on every pass would make total work grow
+# quadratically with session length: 10 + 20 + 30 + ... minutes of audio
+# processed instead of just 10 + 10 + 10. Speaker identity still carries
+# across windows via the live roster's own cosine-similarity matching,
+# not by re-processing old audio again.
+CONSOLIDATION_WINDOW_SECONDS = 600
+
+
 @bp.route("/auth/token", methods=["POST"])
 def issue_token():
     body = request.get_json(silent=True) or {}
@@ -251,6 +285,14 @@ def upload_chunk(session_id):
     if not data.get("diarization_enabled", True):
         session_store.delete_chunk_audio(user_id, session_id)
         data = session_store.update_session(user_id, session_id, audio_deleted=True)
+    else:
+        # Incremental diarization pipeline's fast tier - see
+        # _run_fast_diarize_pass and this module's own top-of-file notes
+        # on the three-tier design. Best-effort and non-blocking: if a
+        # pass is already running for this session, this chunk is simply
+        # left uncovered by the fast tier and picked up by the next
+        # consolidation window instead, rather than queuing up.
+        _trigger_incremental_diarize(user_id, session_id)
     # Only when there's actually something to summarize - an empty (or
     # silent) chunk means an empty transcript, and deepsink_notes treats
     # that as a real error (marks the session "failed"), which is right
@@ -381,17 +423,19 @@ def finish_session(session_id):
     data, error_response = _generate_notes(user_id, session_id)
     if error_response is not None:
         return error_response
-    # Auto-fires once a recording is genuinely finished, not per-chunk
-    # like notes above - diarizing is real CPU-minutes, only worth
-    # paying once there's a final, complete transcript. Manual "Detect
-    # Speakers" (the /diarize route below) still exists for a re-run
-    # after an edit, or for a session finished before this existed. Skips
-    # entirely when diarization_enabled is False - and in that case
-    # there's no audio left to diarize anyway, since upload_chunk already
-    # deleted each chunk's audio as it landed (see that route's own
-    # comment).
+    # The incremental pipeline's fast/consolidated tiers have already
+    # been covering this session as chunks landed (see
+    # _trigger_incremental_diarize in upload_chunk) - this is just the
+    # final catchup for whatever's left since the last consolidation
+    # window, normally well under CONSOLIDATION_WINDOW_SECONDS since the
+    # periodic passes were keeping up throughout. Manual "Detect
+    # Speakers" (the /diarize route below) still exists for a full
+    # from-scratch re-run after an edit, or for a session finished before
+    # this pipeline existed. Skips entirely when diarization_enabled is
+    # False - and in that case there's no audio left to diarize anyway,
+    # since upload_chunk already deleted each chunk's audio as it landed.
     if (data or {}).get("diarization_enabled", True):
-        _trigger_background_diarize(user_id, session_id)
+        _trigger_final_diarize_catchup(user_id, session_id)
     return jsonify(data)
 
 
@@ -699,10 +743,12 @@ def diarize_session(session_id):
 
 
 def _run_diarization(user_id, session_id):
-    """Returns (updated_session, error_response) - error_response is a
-    (jsonify(...), status) tuple on failure, None on success. Shared by
-    the manual /diarize route above and the automatic post-/finish
-    trigger below, so there's exactly one place this actually runs."""
+    """Full, from-scratch, whole-session diarization - the manual
+    "Detect Speakers"/"Re-detect Speakers" path (e.g. after editing the
+    transcript), distinct from the incremental fast/consolidated/final
+    pipeline below that runs automatically during recording. Returns
+    (updated_session, error_response) - error_response is a
+    (jsonify(...), status) tuple on failure, None on success."""
     data = session_store.get_session(user_id, session_id)
     if data is None:
         return None, (jsonify({"error": "not_found"}), 404)
@@ -724,28 +770,201 @@ def _run_diarization(user_id, session_id):
         session_store.update_session(user_id, session_id, is_diarizing=False, diarization_error=e.message)
         return None, (jsonify({"error": e.message}), e.status_code)
 
-    embeddings = result.get("embeddings", {})
-    session_store.save_speaker_embeddings(user_id, session_id, embeddings)
-
-    updated_blocks, speakers = _apply_diarization(
-        data["transcript_blocks"], result.get("segments", []), data.get("speakers") or [], user_id, embeddings
+    # A full manual re-run is authoritative over the WHOLE session - reset
+    # the incremental pipeline's own state first (its live roster,
+    # progress counters, AND the current speakers display list) so this
+    # fresh, full-context result becomes the new baseline, rather than
+    # getting reconciled against - and diluted by - stale per-chunk
+    # guesses the fast/consolidated tiers made earlier in the same
+    # recording. Clearing `speakers` doesn't lose a real name the user
+    # already gave someone: naming a speaker also enrolls their embedding
+    # in the CROSS-session roster (speaker_roster.py), so
+    # _build_speaker_display_list's own roster-match fallback re-applies
+    # that same name to whichever fresh stable id turns out to be them
+    # this time, the same way it would for any other recognized regular.
+    session_end = max(
+        (c["start_offset_seconds"] + c["duration_seconds"] for c in data["chunks"]), default=0.0
     )
-    updated = session_store.set_speakers(user_id, session_id, updated_blocks, speakers)
+    session_store.save_live_speaker_roster(user_id, session_id, [])
+    session_store.update_session(user_id, session_id, speakers=[])
+    _reconcile_and_apply(
+        user_id, session_id, result, threshold=speaker_roster.live_similarity_threshold(),
+        range_start=0.0, range_end=session_end,
+    )
+    updated = session_store.update_session(
+        user_id, session_id,
+        diarization_fast_covered_seconds=session_end, diarization_consolidated_seconds=session_end,
+    )
     return updated, None
 
 
-def _trigger_background_diarize(user_id, session_id):
-    # Quiet no-ops (not an error anywhere a user would see it) if
-    # diarization isn't set up, there's no audio, or one's somehow
-    # already running - the manual "Detect Speakers" button still gives
-    # a real error if genuinely tapped without setup; this is just the
-    # automatic convenience path and shouldn't be noisy about declining.
+# --- Incremental diarization pipeline (fast / consolidated / final) ---
+#
+# Runs automatically while a session with diarization_enabled is being
+# recorded, so speakers get labelled progressively instead of only once
+# at the end. Three tiers, all going through the same _reconcile_and_apply
+# so they all stitch identity together via the session's own live speaker
+# roster (session_store's live_speaker_roster.json, matched by voice-
+# embedding cosine similarity - see speaker_roster.py's
+# match_live_roster/upsert_live_roster): pyannote's own "SPEAKER_00"-style
+# labels only mean anything within the ONE call that produced them, so
+# nothing here relies on them being stable across separate calls.
+#
+#   fast         - triggered per chunk (upload_chunk), diarizes just
+#                  what's landed since the fast tier last ran. Lowest
+#                  latency, lowest context (a short pass on its own is
+#                  noisier), and the only tier that can be silently
+#                  skipped when busy - always covered redundantly by the
+#                  next tier anyway.
+#   consolidated - triggered once ~CONSOLIDATION_WINDOW_SECONDS of fresh
+#                  audio has been fast-covered, re-diarizes that one
+#                  window (not the whole session so far - see
+#                  CONSOLIDATION_WINDOW_SECONDS's own comment) with more
+#                  context, self-correcting whatever the fast tier
+#                  guessed for it.
+#   final        - triggered at /finish: one last consolidation pass over
+#                  whatever's left since the last window, normally well
+#                  under CONSOLIDATION_WINDOW_SECONDS since consolidation
+#                  keeps pace with fast-tier progress throughout.
+#
+# All three share _diarize_lock_for - fast/consolidated acquire non-
+# blocking and skip when busy, final blocks until the lock is free.
+
+def _trigger_incremental_diarize(user_id, session_id):
     if not deepsink_diarize.is_configured():
         return
-    data = session_store.get_session(user_id, session_id)
-    if not data or not data.get("chunks") or data.get("is_diarizing"):
+    lock = _diarize_lock_for(user_id, session_id)
+    if not lock.acquire(blocking=False):
         return
-    threading.Thread(target=lambda: _run_diarization(user_id, session_id), daemon=True).start()
+    def run():
+        try:
+            _run_fast_diarize_pass(user_id, session_id)
+            _maybe_run_consolidation_pass(user_id, session_id)
+        finally:
+            lock.release()
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _run_fast_diarize_pass(user_id, session_id):
+    data = session_store.get_session(user_id, session_id)
+    if data is None:
+        return
+    covered = data.get("diarization_fast_covered_seconds", 0.0)
+    new_chunks = sorted(
+        (c for c in data["chunks"] if c["start_offset_seconds"] >= covered),
+        key=lambda c: c["start_offset_seconds"],
+    )
+    if not new_chunks:
+        return
+
+    chunk_parts = []
+    for chunk in new_chunks:
+        path = session_store.chunk_audio_path(user_id, session_id, chunk["file_name"])
+        if not path.exists():
+            # Audio for at least one new chunk is already gone (e.g.
+            # diarization was toggled off and back on mid-recording) -
+            # best-effort tier, so just stop here rather than error;
+            # whatever's left keeps waiting for a later pass that may
+            # never fully cover this gap, which is an acceptable
+            # degradation for having turned diarization off in between.
+            return
+        chunk_parts.append({
+            "audio_base64": base64.b64encode(path.read_bytes()).decode(),
+            "start_offset_seconds": chunk["start_offset_seconds"],
+        })
+
+    session_store.update_session(user_id, session_id, is_diarizing=True, diarization_error=None)
+    try:
+        result = deepsink_diarize.handle({"chunks": chunk_parts, "format": "m4a"})
+    except ServiceError as e:
+        # Best-effort - leave covered-so-far where it was and let the
+        # next chunk's fast pass (or the next consolidation window) try
+        # again over the combined span, rather than surfacing this as a
+        # session-level failure the way a real transcript/notes error
+        # would be.
+        session_store.update_session(user_id, session_id, is_diarizing=False, diarization_error=e.message)
+        return
+
+    new_covered = max(c["start_offset_seconds"] + c["duration_seconds"] for c in new_chunks)
+    _reconcile_and_apply(
+        user_id, session_id, result, threshold=speaker_roster.live_similarity_threshold(),
+        range_start=covered, range_end=new_covered,
+    )
+    session_store.update_session(user_id, session_id, diarization_fast_covered_seconds=new_covered)
+
+
+def _maybe_run_consolidation_pass(user_id, session_id):
+    data = session_store.get_session(user_id, session_id)
+    if data is None:
+        return
+    fast_covered = data.get("diarization_fast_covered_seconds", 0.0)
+    consolidated = data.get("diarization_consolidated_seconds", 0.0)
+    if fast_covered - consolidated < CONSOLIDATION_WINDOW_SECONDS:
+        return
+    _run_consolidation_pass(user_id, session_id, until=consolidated + CONSOLIDATION_WINDOW_SECONDS)
+
+
+def _run_consolidation_pass(user_id, session_id, until):
+    """Diarizes just [diarization_consolidated_seconds, until) as one
+    pass, then advances the consolidated marker to `until` regardless of
+    whether that window actually had any chunks in it (an empty window -
+    e.g. a long pause - still counts as covered, so this doesn't get
+    stuck retrying it forever)."""
+    data = session_store.get_session(user_id, session_id)
+    if data is None:
+        return
+    start = data.get("diarization_consolidated_seconds", 0.0)
+    window_chunks = sorted(
+        (c for c in data["chunks"] if start <= c["start_offset_seconds"] < until),
+        key=lambda c: c["start_offset_seconds"],
+    )
+    if not window_chunks:
+        session_store.update_session(user_id, session_id, diarization_consolidated_seconds=until)
+        return
+
+    chunk_parts = []
+    for chunk in window_chunks:
+        path = session_store.chunk_audio_path(user_id, session_id, chunk["file_name"])
+        if not path.exists():
+            return  # leave consolidated where it was; see _run_fast_diarize_pass's own comment
+        chunk_parts.append({
+            "audio_base64": base64.b64encode(path.read_bytes()).decode(),
+            "start_offset_seconds": chunk["start_offset_seconds"],
+        })
+
+    session_store.update_session(user_id, session_id, is_diarizing=True, diarization_error=None)
+    try:
+        result = deepsink_diarize.handle({"chunks": chunk_parts, "format": "m4a"})
+    except ServiceError as e:
+        session_store.update_session(user_id, session_id, is_diarizing=False, diarization_error=e.message)
+        return
+
+    _reconcile_and_apply(
+        user_id, session_id, result, threshold=speaker_roster.live_similarity_threshold(),
+        range_start=start, range_end=until,
+    )
+    session_store.update_session(user_id, session_id, diarization_consolidated_seconds=until)
+
+
+def _trigger_final_diarize_catchup(user_id, session_id):
+    if not deepsink_diarize.is_configured():
+        return
+    def run():
+        lock = _diarize_lock_for(user_id, session_id)
+        # Blocks (unlike the fast/consolidated triggers) - /finish is the
+        # one moment that actually needs to wait for whatever's in flight
+        # rather than skip, so the final pass genuinely covers everything.
+        lock.acquire()
+        try:
+            data = session_store.get_session(user_id, session_id)
+            if not data or not data.get("chunks"):
+                return
+            session_end = max(c["start_offset_seconds"] + c["duration_seconds"] for c in data["chunks"])
+            if session_end > data.get("diarization_consolidated_seconds", 0.0):
+                _run_consolidation_pass(user_id, session_id, until=session_end)
+        finally:
+            lock.release()
+    threading.Thread(target=run, daemon=True).start()
 
 
 @bp.route("/sessions/<session_id>/speakers/<speaker_id>", methods=["PATCH"])
@@ -762,12 +981,14 @@ def rename_speaker(session_id, speaker_id):
         return jsonify({"error": "not_found"}), 404
 
     # Naming a speaker IS the roster enrollment step - see
-    # speaker_roster.py's own docstring. This session's own diarization
-    # run is the only place that embedding exists; a future session
-    # re-diarized after this checks the roster and can auto-apply this
-    # same name instead of a fresh "Person N".
-    embeddings = session_store.load_speaker_embeddings(user_id, session_id)
-    embedding = embeddings.get(speaker_id)
+    # speaker_roster.py's own docstring. This session's own live speaker
+    # roster (not the raw output of any one diarization call - see the
+    # incremental pipeline above) is what holds a stable id's best-known
+    # embedding; a future session diarized after this checks the
+    # cross-session roster and can auto-apply this same name instead of
+    # a fresh "Person N".
+    roster = session_store.load_live_speaker_roster(user_id, session_id)
+    embedding = next((e["embedding"] for e in roster if e["id"] == speaker_id), None)
     if embedding:
         speaker_roster.upsert(user_id, display_name, embedding)
 
@@ -777,12 +998,81 @@ def rename_speaker(session_id, speaker_id):
 _AUTO_SPEAKER_NAME_RE = re.compile(r"^Person \d+$")
 
 
+def _reconcile_and_apply(user_id, session_id, diarize_result, threshold, range_start, range_end):
+    """Takes one diarize() call's raw result (its own call-local
+    "SPEAKER_00"-style labels, meaningless outside that one call) and:
+    1. matches each of its speakers against this session's live roster
+       by voice-embedding cosine similarity, reusing a stable id
+       ("SPEAKER_1", ...) when it's the same voice as an earlier call
+       (fast, consolidated, or a previous call within this same pass),
+       minting a new one otherwise;
+    2. re-tags every transcript block whose time falls within
+       [range_start, range_end) with that stable id - this is what lets
+       a later, higher-context pass self-correct an earlier tier's
+       guess, since it simply overwrites the same range rather than
+       only ever appending;
+    3. rebuilds the session's speakers display list from the full,
+       now-updated block set.
+    Never touches blocks outside that range.
+
+    `range_start`/`range_end` are the audio range the CALLER actually
+    asked deepsink_diarize to process (each chunk's own start_offset/
+    duration), not inferred from the result's own segments - pyannote's
+    reported segments don't necessarily span the exact input audio (it
+    trims leading/trailing silence internally), so a block sitting right
+    at the edge of what was sent could fall just outside the segments'
+    own min/max and never get tagged. Confirmed as a real bug this way:
+    a session's very first block (start=0.0) was left with no speaker_id
+    at all because the first detected segment started a fraction of a
+    second later than 0.0."""
+    data = session_store.get_session(user_id, session_id)
+    if data is None:
+        return
+    segments = diarize_result.get("segments", [])
+    call_embeddings = diarize_result.get("embeddings", {})
+    if not segments:
+        session_store.update_session(user_id, session_id, is_diarizing=False)
+        return
+
+    roster = session_store.load_live_speaker_roster(user_id, session_id)
+    existing_numbers = [
+        int(e["id"].split("_")[1]) for e in roster
+        if e["id"].startswith("SPEAKER_") and e["id"].split("_")[1].isdigit()
+    ]
+    next_stable_number = (max(existing_numbers) + 1) if existing_numbers else 1
+
+    call_label_to_stable = {}
+    for call_label, embedding in call_embeddings.items():
+        matched_id, _ = speaker_roster.match_live_roster(roster, embedding, threshold)
+        if matched_id:
+            stable_id = matched_id
+        else:
+            stable_id = f"SPEAKER_{next_stable_number}"
+            next_stable_number += 1
+        call_label_to_stable[call_label] = stable_id
+        speaker_roster.upsert_live_roster(roster, stable_id, embedding)
+    session_store.save_live_speaker_roster(user_id, session_id, roster)
+
+    stable_segments = [
+        {"start": s["start"], "end": s["end"], "speaker": call_label_to_stable.get(s["speaker"], s["speaker"])}
+        for s in segments
+    ]
+
+    blocks = data["transcript_blocks"]
+    in_range = [b for b in blocks if range_start <= b["start"] < range_end]
+    outside_range = [b for b in blocks if not (range_start <= b["start"] < range_end)]
+    retagged = _apply_diarization_to_blocks(in_range, stable_segments)
+    updated_blocks = sorted(outside_range + retagged, key=lambda b: b["start"])
+
+    speakers = _build_speaker_display_list(updated_blocks, data.get("speakers") or [], user_id, roster)
+    session_store.set_speakers(user_id, session_id, updated_blocks, speakers)
+
+
 # Same time-overlap assignment DeepSink's mobile app used to do locally
-# (SpeakerDiarization.assign/defaultSpeakers) - reimplemented here since
-# diarization is now a server-side write, not something the client
-# merges into its own copy.
-def _apply_diarization(blocks, segments, previous_speakers, user_id, embeddings):
-    previous_names = {s["id"]: s["display_name"] for s in previous_speakers}
+# (SpeakerDiarization.assign/defaultSpeakers) before diarization became a
+# server-side write - given a set of blocks and (already stable-id)
+# segments, tags each block with whichever segment covers its start time.
+def _apply_diarization_to_blocks(blocks, segments):
     updated_blocks = []
     for block in blocks:
         speaker_id = None
@@ -791,33 +1081,63 @@ def _apply_diarization(blocks, segments, previous_speakers, user_id, embeddings)
                 speaker_id = seg["speaker"]
                 break
         if speaker_id is None:
-            candidates = [seg for seg in segments if seg["start"] <= block["start"]]
-            if candidates:
-                speaker_id = max(candidates, key=lambda s: s["start"])["speaker"]
+            earlier = [seg for seg in segments if seg["start"] <= block["start"]]
+            if earlier:
+                speaker_id = max(earlier, key=lambda s: s["start"])["speaker"]
+            elif segments:
+                # Nothing starts at or before this block - pyannote
+                # trimmed a bit of leading silence internally, so the
+                # very first block(s) can start slightly earlier than
+                # its first detected segment. Falling forward to that
+                # first segment (rather than leaving speaker_id
+                # unset) is what actually fixed a real, observed bug:
+                # a session's first block was silently left untagged,
+                # and with it the whole speakers list came back empty.
+                speaker_id = min(segments, key=lambda s: s["start"])["speaker"]
         updated = dict(block)
         updated["speaker_id"] = speaker_id
         updated_blocks.append(updated)
+    return updated_blocks
+
+
+def _build_speaker_display_list(blocks, previous_speakers, user_id, roster):
+    """Rebuilds the {"id", "display_name"} list shown to the user from
+    the full current set of (stable-id-tagged) blocks. Once a stable id
+    has any display name - auto or a real, user-chosen one - it keeps it
+    on every later reconciliation; only a stable id that's brand new to
+    this session gets a fresh number (or a cross-session roster-matched
+    real name). Without this, the SAME speaker's "Person N" could
+    renumber every time a later tier's pass reconciles the session,
+    which would look like random relabeling rather than the intended
+    "self-correct silently, keep names stable" behavior."""
+    previous_by_id = {s["id"]: s["display_name"] for s in previous_speakers}
+    roster_by_id = {e["id"]: e["embedding"] for e in roster}
 
     seen_order = []
-    for block in sorted(updated_blocks, key=lambda b: b["start"]):
+    for block in sorted(blocks, key=lambda b: b["start"]):
         sid = block.get("speaker_id")
         if sid and sid not in seen_order:
             seen_order.append(sid)
 
+    used_numbers = set()
+    for name in previous_by_id.values():
+        m = _AUTO_SPEAKER_NAME_RE.match(name or "")
+        if m:
+            used_numbers.add(int(name.split(" ")[1]))
+    next_person_number = (max(used_numbers) + 1) if used_numbers else 1
+
     speakers = []
-    for i, sid in enumerate(seen_order):
-        previous = previous_names.get(sid)
-        if previous and not _AUTO_SPEAKER_NAME_RE.match(previous):
-            # A real, user-confirmed name (a previous rename on this
-            # exact session, e.g. re-running Detect Speakers after an
-            # edit) - keep it, don't let a roster match override a name
-            # the user already chose for this speaker in this session.
-            display_name = previous
+    for sid in seen_order:
+        previous = previous_by_id.get(sid)
+        if previous:
+            speakers.append({"id": sid, "display_name": previous})
+            continue
+        embedding = roster_by_id.get(sid)
+        matched_name = speaker_roster.match(user_id, embedding) if embedding else None
+        if matched_name:
+            display_name = matched_name
         else:
-            # Still just an auto-assigned placeholder (or first time
-            # seeing this speaker) - always worth a fresh roster check,
-            # since the roster can grow between one Detect Speakers run
-            # and the next even for the same session.
-            display_name = speaker_roster.match(user_id, embeddings.get(sid)) or f"Person {i + 1}"
+            display_name = f"Person {next_person_number}"
+            next_person_number += 1
         speakers.append({"id": sid, "display_name": display_name})
-    return updated_blocks, speakers
+    return speakers

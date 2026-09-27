@@ -103,6 +103,8 @@ _SCHEMA_DEFAULTS = {
     "notes_generation_cancelled": False,
     "category": "meeting",
     "diarization_enabled": True,
+    "diarization_fast_covered_seconds": 0.0,
+    "diarization_consolidated_seconds": 0.0,
 }
 
 
@@ -162,6 +164,18 @@ def create_session(
         # is the only reason this server needs to hold onto raw audio
         # past transcription at all.
         "diarization_enabled": bool(diarization_enabled),
+        # How far (session-absolute seconds) the incremental diarization
+        # pipeline has covered so far, at each of its two tiers - see
+        # deepsink_sessions.py's _run_fast_diarize_pass/
+        # _run_consolidation_pass. "fast" advances per chunk (a quick,
+        # lower-context pass for near-immediate speaker labels);
+        # "consolidated" advances in ~10-minute windows behind it (a
+        # slower, higher-context pass that self-corrects whatever the
+        # fast tier guessed for that stretch). Both session-absolute like
+        # chunk offsets, so a Resume just continues them rather than
+        # needing special-casing.
+        "diarization_fast_covered_seconds": 0.0,
+        "diarization_consolidated_seconds": 0.0,
         # "ready" (an empty, nothing-pending session - a true, if
         # slightly vacuous, description) rather than "recording" for a
         # session nobody's actually recording yet - e.g. one prepared
@@ -427,34 +441,41 @@ def rename_speaker(user_id, session_id, speaker_id, display_name):
         return data
 
 
-# Per-speaker voice-embedding vectors from the session's last diarization
-# run (deepsink_diarize's "embeddings" result) - kept in their own file
-# alongside session.json rather than as a field on it, since these are
-# only ever needed once, at rename time (to feed speaker_roster.upsert),
-# not something any client (mobile/web) has a reason to fetch on every
-# ordinary session read. Session-local by nature - "SPEAKER_00" only
-# means something within the one diarization run that produced it, so
-# this is overwritten wholesale on every re-diarize, never merged.
+# This session's OWN running roster of {"id", "embedding", "sample_count"}
+# entries - kept in its own file alongside session.json, same reasoning
+# as speaker_roster.py's per-user one (only ever needed by the
+# diarization pipeline itself, not something any client has a reason to
+# fetch on an ordinary session read). Distinct from speaker_roster.py's
+# roster, which is cross-session and keyed by a real (user-chosen) name:
+# this one is session-local and keyed by a stable id ("SPEAKER_1", ...)
+# that persists across THIS session's own separate diarization calls
+# (deepsink_sessions.py's fast/consolidated/final passes) - a single
+# pyannote call's own "SPEAKER_00"-style labels only mean anything within
+# that one call, so this is what actually stitches identity back
+# together across calls via voice-embedding cosine similarity. Grows
+# (never wholesale-overwritten) across a session's incremental
+# diarization passes - each stable id's embedding is a running mean over
+# every pass that's matched it, same as speaker_roster.py's own upsert().
 
-def _speaker_embeddings_path(user_id, session_id):
-    return _session_dir(user_id, session_id) / "speaker_embeddings.json"
+def _live_speaker_roster_path(user_id, session_id):
+    return _session_dir(user_id, session_id) / "live_speaker_roster.json"
 
 
-def save_speaker_embeddings(user_id, session_id, embeddings):
-    path = _speaker_embeddings_path(user_id, session_id)
+def load_live_speaker_roster(user_id, session_id):
+    path = _live_speaker_roster_path(user_id, session_id)
+    if not path.exists():
+        return []
+    with open(path) as f:
+        return json.load(f)
+
+
+def save_live_speaker_roster(user_id, session_id, roster):
+    path = _live_speaker_roster_path(user_id, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".json.tmp")
     with open(tmp_path, "w") as f:
-        json.dump(embeddings, f)
+        json.dump(roster, f, indent=2)
     tmp_path.replace(path)
-
-
-def load_speaker_embeddings(user_id, session_id):
-    path = _speaker_embeddings_path(user_id, session_id)
-    if not path.exists():
-        return {}
-    with open(path) as f:
-        return json.load(f)
 
 
 # Background prep materials (uploaded PDF/text files) - metadata lives
